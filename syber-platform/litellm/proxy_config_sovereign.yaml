@@ -1,0 +1,25 @@
+# litellm/proxy_config_sovereign.yaml — Phase 2: self-hosted DeepSeek (spec §8.5)
+#
+# Air-gapped UAE-sovereign deployment. The harness code does not change — only
+# api_base / api_key change. DeepSeek V4 weights are served by vLLM on an
+# internal GPU cluster (8x H100 80GB minimum; 4-5x H100 with FP8, spec §16.2).
+model_list:
+  - model_name: claude-opus-4-20250514
+    litellm_params:
+      model: openai/deepseek-v4-pro            # vLLM OpenAI-compatible endpoint
+      api_base: http://gpu-cluster-tier2:8080
+      api_key: internal-auth-token
+
+  - model_name: claude-sonnet-4-20250514
+    litellm_params:
+      model: openai/deepseek-v4-flash
+      api_base: http://gpu-cluster-tier2:8081
+      api_key: internal-auth-token
+
+litellm_settings:
+  drop_params: true
+  num_retries: 3
+  request_timeout: 120
+
+general_settings:
+  master_key: sk-litellm-master-key

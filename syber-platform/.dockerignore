@@ -1,0 +1,12 @@
+.venv/
+**/__pycache__/
+*.pyc
+.git/
+.pytest_cache/
+.audit_log/
+.memory_store.sqlite
+.investigation_state/
+.scan_authorization.json
+*.joblib
+node_modules/
+infra/**/*.tar

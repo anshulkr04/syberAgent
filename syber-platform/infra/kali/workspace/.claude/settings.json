@@ -1,0 +1,9 @@
+{
+  "permissions": {
+    "defaultMode": "bypassPermissions"
+  },
+  "enableAllProjectMcpServers": true,
+  "enabledMcpjsonServers": ["syber-tools"],
+  "skipDangerousModePermissionPrompt": true,
+  "includeCoAuthoredBy": false
+}

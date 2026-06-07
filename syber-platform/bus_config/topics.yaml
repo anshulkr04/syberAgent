@@ -1,0 +1,33 @@
+# Kafka topic definitions (spec §4.1)
+topics:
+  - name: raw_events
+    partitions: 24
+    replication_factor: 3
+    config:
+      retention.ms: 2592000000      # 30 days
+      compression.type: lz4
+      min.insync.replicas: 2
+
+  - name: graph_updates
+    partitions: 12
+    replication_factor: 3
+
+  - name: anomaly_detected
+    partitions: 12
+    replication_factor: 3
+
+  - name: findings
+    partitions: 6
+    replication_factor: 3
+    config:
+      retention.ms: 7776000000      # 90 days
+
+  - name: verified_findings
+    partitions: 6
+    replication_factor: 3
+
+  - name: dead_letter
+    partitions: 6
+    replication_factor: 3
+    config:
+      retention.ms: 2592000000

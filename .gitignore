@@ -1,0 +1,67 @@
+# ============================================================================
+# Syber Agent — root .gitignore
+# ============================================================================
+
+# --- Secrets (NEVER commit) -------------------------------------------------
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+**/secrets/
+
+# --- Python virtualenv & caches ---------------------------------------------
+.venv/
+venv/
+env/
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.egg-info/
+build/
+dist/
+syber-platform/dist/            # packaged Kali image tarball (~1.5 GB)
+*.tar
+*.tar.gz
+
+# --- Node ------------------------------------------------------------------
+node_modules/
+npm-debug.log*
+yarn-error.log*
+
+# --- Syber runtime state (regenerated at run time) --------------------------
+.audit_log/
+.memory_store.sqlite
+.investigation_state/
+.scan_authorization.json
+**/.audit_log/
+**/.memory_store.sqlite
+**/.investigation_state/
+**/.scan_authorization.json
+syber-platform/syber/scoring/calibration/*.joblib
+
+# --- Claude Code / local machine settings -----------------------------------
+.claude/settings.local.json
+**/.claude/settings.local.json
+.claude/projects/
+CLAUDE.local.md
+
+# --- agent-browser (third-party tool clone + its browser/session data) ------
+agent-browser/
+.agent-browser/
+**/agent-browser-chrome-*/
+*.session.json
+
+# --- OS / editor cruft ------------------------------------------------------
+.DS_Store
+.DS_Store?
+._*
+Thumbs.db
+*.swp
+*~
+.idea/
+.vscode/*
+!.vscode/extensions.json

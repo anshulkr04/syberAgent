@@ -1,0 +1,28 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "syber-platform"
+version = "3.0.0"
+description = "Syber Multi-Agent Security Intelligence Platform (spec v3.0)"
+requires-python = ">=3.11"
+dependencies = [
+    "openai>=1.40",
+    "scikit-learn>=1.4",
+    "networkx>=3.2",
+    "jsonschema>=4.20",
+    "numpy>=1.26",
+    "joblib>=1.3",
+]
+
+[project.optional-dependencies]
+backends = ["neo4j>=6.0", "confluent-kafka>=2.3", "psycopg[binary]>=3.2", "pyyaml>=6.0"]
+mcp = ["mcp>=1.2"]
+
+[project.scripts]
+syber-demo = "syber.demo:main"
+syber-recon = "syber.recon.demo:main"
+
+[tool.setuptools.packages.find]
+include = ["syber*"]

@@ -1,0 +1,30 @@
+# litellm/proxy_config.yaml — Phase 1: DeepSeek API (spec §8.3)
+#
+# The Claude Agent SDK speaks the Anthropic wire format; DeepSeek exposes an
+# OpenAI-compatible endpoint. LiteLLM translates between them. Point the SDK at
+# this proxy with:
+#   export ANTHROPIC_BASE_URL="http://litellm-proxy:4000"
+#   export ANTHROPIC_AUTH_TOKEN="sk-litellm-master-key"
+#
+# This repo's runnable platform talks to DeepSeek directly (syber/llm/client.py);
+# this config is for the SDK-harness deployment described in the spec.
+model_list:
+  - model_name: claude-opus-4-20250514       # SDK requests this alias -> v4 pro tier
+    litellm_params:
+      model: deepseek/deepseek-reasoner       # spec: deepseek-v4-pro
+      api_key: os.environ/DEEPSEEK_API_KEY
+      api_base: https://api.deepseek.com
+
+  - model_name: claude-sonnet-4-20250514     # used by structured-extraction subagents
+    litellm_params:
+      model: deepseek/deepseek-chat           # spec: deepseek-v4-flash
+      api_key: os.environ/DEEPSEEK_API_KEY
+      api_base: https://api.deepseek.com
+
+litellm_settings:
+  drop_params: true        # drop Anthropic-specific params DeepSeek does not support
+  num_retries: 3
+  request_timeout: 120
+
+general_settings:
+  master_key: sk-litellm-master-key
