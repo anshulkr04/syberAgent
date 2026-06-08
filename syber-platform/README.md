@@ -151,7 +151,7 @@ a DeepSeek finding. It is default-deny: a target must be authorised first
 with the scanning toolchain + the `agent-browser` browser + the baked Syber workspace:
 ```bash
 docker compose -f infra/docker-compose.kali.yml up -d neo4j postgres kafka
-docker compose -f infra/docker-compose.kali.yml build kali      # or: docker load -i dist/syber-kali-image.tar.gz
+docker compose -f infra/docker-compose.kali.yml build kali      # or: docker load -i ~/syber-dist/syber-kali-image.tar.gz
 docker compose -f infra/docker-compose.kali.yml run --rm kali   # Claude Code inside Kali
 #   /syber-scan scanme.nmap.org          # scan -> Neo4j -> finding
 #   open example.com and snapshot it     # agent-browser, on by default
@@ -161,7 +161,7 @@ docker compose -f infra/docker-compose.kali.yml run --rm kali   # Claude Code in
   used since it would block scanning/browsing network access).
 - **Browser:** `agent-browser` + system `chromium`, known to Claude by default via a bundled
   skill. Verified: open/snapshot/click/screenshot headless in-container.
-- **Packaged:** `dist/syber-kali-image.tar.gz` (1.5GB) — `docker load -i` to run anywhere.
+- **Packaged:** `~/syber-dist/syber-kali-image.tar.gz` (~3-4GB, slimmed) — `docker load -i ~/syber-dist/syber-kali-image.tar.gz` to run anywhere.
 
 **Try the recon flow without the interactive session:**
 ```bash

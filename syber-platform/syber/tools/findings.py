@@ -95,6 +95,15 @@ def publish_finding(args: dict[str, Any]) -> dict[str, Any]:
     except Exception:  # noqa: BLE001 - memory write must not break publishing
         pass
 
+    # Store the finding into the attack-surface graph (graph = source of truth),
+    # linked to the host it is about when that host is in scope.
+    try:
+        from ..graph.model import upsert_finding
+        host = next((e for e in scope.allowed_entities if not e.replace(".", "").isdigit()), None)
+        upsert_finding(finding, host=host)
+    except Exception:  # noqa: BLE001 - graph write must not break publishing
+        pass
+
     return {"status": "published", "finding": finding}
 
 

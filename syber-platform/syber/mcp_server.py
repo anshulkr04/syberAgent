@@ -38,10 +38,11 @@ from syber.data_lake import get_data_lake  # noqa: F401  (ensures singleton init
 from syber.graph.store import get_graph
 from syber.harness.memory_integrity import get_memory_store
 from syber.llm.exceptions import HumanApprovalRequired
-from syber.recon.site_recon import recon_site
+from syber.recon.browser_recon import browser_available, ingest_recon_to_graph
+from syber.recon.browser_recon import recon_site as browser_recon_site
 from syber.response.executor import execute_playbook, mock_integration
 from syber.response.playbooks import CRED_REVOKE_PLAYBOOK, matches_trigger
-from syber.scanning import active_scan
+from syber.scanning import active_scan, webapp
 from syber.scanning.active_scan import NotAuthorized
 from syber.scanning.authorization import get_auth_store
 from syber.scoring.gate import gate_candidate
@@ -116,46 +117,38 @@ def syber_start_investigation(
 
 @mcp.tool()
 def syber_recon_site(site: str) -> dict[str, Any]:
-    """Investigate a real website/domain: passive reconnaissance returning DNS,
-    HTTP + security headers, TLS certificate, server/technology fingerprint,
-    exposed sensitive paths, and risk indicators. Opens a recon investigation
-    scope and registers the host in the knowledge graph, so you can then call
-    syber_publish_finding (citing the recon observations as evidence_refs) and
-    syber_gate_finding. Pass a domain or URL (e.g. 'example.com')."""
-    report = recon_site(site)
+    """Investigate a real website/domain using a REAL BROWSER (agent-browser +
+    Chrome) — never curl. Navigates the site with a genuine browser fingerprint
+    (so it is not flagged as a bot), and returns DNS, HTTP status + security
+    headers (captured via HAR), TLS certificate, server/technology fingerprint
+    from the rendered DOM, form/input/link counts, a screenshot path, and risk
+    indicators. Ingests the host/web-endpoint/technologies/certificate into the
+    attack-surface graph. Then call syber_publish_finding + syber_gate_finding."""
+    report = browser_recon_site(site)
     host = report.get("host", site)
     addrs = report.get("dns", {}).get("addresses", []) if isinstance(report.get("dns"), dict) else []
 
     scope = InvestigationScope(
-        investigation_id=f"RECON-{host}",
-        allowed_entities={host, *addrs},
+        investigation_id=f"RECON-{host}", allowed_entities={host, *addrs},
         time_start_utc="", time_end_utc="",
     )
     set_current_scope(scope)
     _STATE["scope"] = scope
     _STATE["trigger"] = {"event_type": "site_recon", "entity_id": host, "report": report}
 
-    # Register the host (and its IPs) in the attack graph (spec §6).
-    try:
-        g = get_graph()
-        g.add_node(host, "Asset", hostname=host, asset_class="web", ip=(addrs[0] if addrs else ""))
-        for ip in addrs:
-            g.add_node(ip, "Asset", hostname=host, ip=ip, asset_class="web_endpoint")
-            g.add_edge(host, ip, "RESOLVES_TO", edge_weight=1.0)
-    except Exception:  # noqa: BLE001
-        pass
-
-    get_audit_log().write("site_recon", {"host": host, "risk_indicators": report.get("risk_indicators", [])})
+    graph_ingest = ingest_recon_to_graph(report)
+    get_audit_log().write("site_recon", {"host": host, "method": "browser",
+                                         "risk_indicators": report.get("risk_indicators", [])})
     return {
         "investigation_id": scope.investigation_id,
         "report": report,
-        "suggested_evidence_refs": [f"recon:{k}" for k in ("dns", "http", "tls", "exposed_paths")
-                                    if report.get(k)],
-        "next": "Analyse the report, then call syber_publish_finding with an attack_chain of "
-                "the exposure observations (each step: status confirmed, evidence_refs like "
-                "'recon:http', 'recon:tls'), mitre_techniques (e.g. T1595 Active Scanning, "
-                "T1592 Gather Victim Host Information), confidence_estimate, severity. Then "
-                "call syber_gate_finding.",
+        "graph": graph_ingest,
+        "browser_used": browser_available(),
+        "suggested_evidence_refs": [f"recon:{k}" for k in ("dns", "http", "tls") if report.get(k)],
+        "next": "Optionally drive agent-browser yourself to inspect the page further (snapshot, "
+                "click, screenshot). Then call syber_publish_finding (attack_chain steps with "
+                "evidence_refs like 'recon:http','recon:tls'; mitre e.g. T1592 Gather Victim Host "
+                "Information, T1595 Active Scanning) and syber_gate_finding.",
     }
 
 
@@ -235,6 +228,62 @@ def syber_full_scan(target: str, do_web: bool = True) -> dict[str, Any]:
         _STATE["scope"] = scope
         _STATE["trigger"] = {"event_type": "active_scan", "entity_id": target, "scan": out}
     return out
+
+
+# --------------------------------------------------------------------------- #
+# Web-application testing (AUTHORISED targets only — OWASP WSTG / API Top 10)
+# --------------------------------------------------------------------------- #
+@mcp.tool()
+def syber_pentest_plan(target: str) -> dict[str, Any]:
+    """Return the Pentest Task Tree (PTT) for a target: the ordered phases/tasks to
+    complete for a thorough engagement (auth -> network -> app mapping -> app testing
+    -> synthesise). Work through it top-to-bottom; don't conclude with tasks unaddressed.
+    No target authorisation needed to view the plan."""
+    return webapp.pentest_plan(target)
+
+
+@mcp.tool()
+def syber_crawl(target: str, max_pages: int = 40, max_depth: int = 2, cookies: str = "") -> dict[str, Any]:
+    """Crawl an AUTHORISED web target (browser-first) to map its real attack surface:
+    endpoints, forms, and PARAMETERS — ingested into the graph. `cookies` (a Cookie
+    header string) crawls authenticated areas. This is what application scanners test
+    that nmap/nikto/nuclei cannot see."""
+    return _scan(webapp.crawl, target, max_pages=max_pages, max_depth=max_depth,
+                 cookies=cookies or None)
+
+
+@mcp.tool()
+def syber_test_access_control(url: str, id_param: str = "", cookies_a: str = "",
+                              cookies_b: str = "", known_other_ids: list[str] | None = None) -> dict[str, Any]:
+    """Test an AUTHORISED endpoint for Broken Object Level Authorization (BOLA/IDOR) —
+    OWASP API #1, invisible to template scanners. Varies the object id and compares
+    responses; with two accounts (`cookies_a`, `cookies_b` = Cookie header strings) it
+    fetches A's object as B to prove ownership isn't enforced. `known_other_ids` are
+    ids harvested elsewhere (chained-disclosure testing). Returns confirmed findings
+    with evidence."""
+    return _scan(webapp.test_access_control, url, id_param=id_param or None,
+                 cookies_a=cookies_a or None, cookies_b=cookies_b or None,
+                 known_other_ids=known_other_ids or None)
+
+
+@mcp.tool()
+def syber_test_injection(url: str, params: list[str] | None = None, cookies: str = "") -> dict[str, Any]:
+    """Probe an AUTHORISED endpoint's parameters for reflected XSS, error-based SQL
+    injection, and SSRF (non-destructive, read-only payloads). If `params` is omitted,
+    the query parameters in `url` are tested. Returns confirmed findings with the
+    payload and response evidence."""
+    return _scan(webapp.test_injection, url, params=params or None, cookies=cookies or None)
+
+
+@mcp.tool()
+def syber_http_request(url: str, method: str = "GET", headers: dict[str, str] | None = None,
+                       body: str = "", cookies: str = "") -> dict[str, Any]:
+    """Send a single crafted HTTP request to an AUTHORISED target and return
+    {status, headers, body, length, transport}. Browser-first transport (real
+    fingerprint + live session); uses the HTTP client when `cookies` are supplied or
+    the browser is unavailable. The low-level primitive for manual web testing."""
+    return _scan(webapp.http_request, url, method=method, headers=headers or None,
+                 body=body or None, cookies=cookies or None)
 
 
 @mcp.tool()

@@ -1,40 +1,38 @@
 ---
-description: Investigate a real website/domain — passive recon (DNS, HTTP, TLS, security headers, tech, exposed paths) then a DeepSeek-reasoned security finding
+description: Investigate a website with a REAL browser (agent-browser) — never curl — then graph + DeepSeek finding
 argument-hint: "<site>  e.g. example.com"
 ---
 
-Investigate the site: **$ARGUMENTS**
+Investigate the site **$ARGUMENTS** using a real browser. **Do not use curl/wget/urllib for any
+web content** — use the real browser so the target is not flagged as a bot.
 
-You are the Syber Security Intelligence Platform running inside Claude Code, backed by
-DeepSeek V4. Do the following:
+1. **Browser recon.** Call `mcp__syber-tools__syber_recon_site` with `site="$ARGUMENTS"`. This
+   navigates with real Chrome (agent-browser), captures status + security headers via HAR, reads
+   the rendered DOM (title, technologies, forms/inputs/links), takes a screenshot, inspects DNS
+   and the TLS certificate, and ingests the host/web-endpoint/technologies/certificate into the
+   Neo4j attack-surface graph.
 
-1. **Collect the details.** Call `mcp__syber-tools__syber_recon_site` with `site="$ARGUMENTS"`.
-   This performs passive reconnaissance and returns DNS, HTTP response + security headers,
-   the TLS certificate, server/technology fingerprint, exposed sensitive paths, and a list
-   of risk indicators. It also opens a recon investigation scope.
+2. **Look closer with the browser (encouraged).** Drive `agent-browser` yourself to inspect
+   anything interesting: `agent-browser open <url> && agent-browser snapshot -i`, examine
+   forms/login pages, `agent-browser screenshot evidence.png`. Re-snapshot after any navigation.
 
-2. **Present the details** clearly to the user as a report:
-   - Host, resolved IPs, reverse DNS
-   - HTTP status, server/tech fingerprint, page title
-   - **Security headers**: which are present, which are missing (and why each matters)
-   - **TLS**: issuer, validity window, SANs, protocol/cipher
-   - **Exposed paths** discovered
-   - The risk indicators
+3. **Read the graph.** Call `mcp__syber-tools__syber_get_graph_context` for the host to see its
+   exposure (technologies, web endpoints, certificate, risk score) and the ranked attack surface.
 
-3. **Assemble a finding.** Reason about the security posture and call
-   `mcp__syber-tools__syber_publish_finding`:
-   - `attack_chain`: one step per significant exposure observation, each with
-     `status: "confirmed"`, a `description`, a `mitre_technique`
-     (e.g. T1595 Active Scanning, T1592 Gather Victim Host Information,
-     T1190 Exploit Public-Facing Application where a real weakness exists), and
-     `evidence_refs` drawn from the recon report (e.g. `recon:http`, `recon:tls`,
-     `recon:exposed_paths`, `recon:dns`).
-   - `evidence_refs`: the distinct refs used across the chain (need >= 3).
-   - `mitre_techniques`, `confidence_estimate`, and a `severity` proportionate to what was
-     actually found (do not inflate — a site merely missing HSTS is not CRITICAL).
+4. **Report** clearly: host/IPs, HTTP status + redirect chain, **the real User-Agent the site
+   saw** (proving browser-based access), present/missing security headers (and why each matters),
+   detected technologies, TLS cert (issuer/validity/SANs), forms present, and the risk indicators.
 
-4. **Gate it.** Call `mcp__syber-tools__syber_gate_finding` and report the Composite
-   Evidence Score verdict.
+5. **Finding.** Call `mcp__syber-tools__syber_publish_finding` — attack_chain steps with
+   `evidence_refs` (`recon:http`, `recon:tls`, `recon:dns`), MITRE T-IDs (e.g. T1592 Gather Victim
+   Host Information, T1595 Active Scanning), `confidence_estimate`, an `exploitability`
+   (none/theoretical/known-exploit/poc/confirmed/weaponized/unknown), and a `severity` by
+   **evidence**. Then `mcp__syber-tools__syber_gate_finding`.
 
-Only passive reconnaissance is performed. Do not attempt exploitation. Report findings
-factually and proportionately.
+**Severity discipline (don't over-rate).** Severity = exploitability × exposure × impact, not
+instinct. Missing HSTS/CSP is LOW at most. Version/server banners and **public keys** (TLS cert
+keys, SSH host keys — they are *meant* to be public) are **INFO, not vulnerabilities**. A valid
+TLS cert is normal. Reserve HIGH/CRITICAL for concrete exploitability — an exposed `/.git`/`.env`
+with live contents, default/weak creds, a confirmed exploit. When unsure, rate LOWER.
+
+Passive recon only here (no exploitation). Report factually.

@@ -19,9 +19,18 @@ from __future__ import annotations
 import itertools
 import os
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from typing import Any
 
 import networkx as nx
+
+
+def _now() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+# Severity -> numeric weight for host risk scoring.
+_SEV_WEIGHT = {"critical": 10.0, "high": 6.0, "medium": 3.0, "low": 1.0, "info": 0.2, "unknown": 0.5}
 
 
 @dataclass
@@ -50,7 +59,16 @@ class KnowledgeGraph:
 
     # -- mutation ----------------------------------------------------------- #
     def add_node(self, node_id: str, label: str, **props: Any) -> None:
-        self.g.add_node(node_id, label=label, **props)
+        """Upsert a node with provenance: first_seen is set once, last_seen and
+        any non-null props are updated on every observation (idempotent MERGE)."""
+        now = _now()
+        props = {k: v for k, v in props.items() if v is not None}
+        if self.g.has_node(node_id):
+            self.g.nodes[node_id].update(props)
+            self.g.nodes[node_id]["label"] = label
+            self.g.nodes[node_id]["last_seen"] = now
+        else:
+            self.g.add_node(node_id, label=label, first_seen=now, last_seen=now, **props)
 
     def add_edge(self, src: str, dst: str, edge_type: str, edge_weight: float = 1.0, **props: Any) -> None:
         self.g.add_edge(src, dst, edge_type=edge_type, edge_weight=edge_weight, **props)
@@ -135,6 +153,75 @@ class KnowledgeGraph:
             blast_radius_count=self.blast_radius(entity_id),
             top_betweenness=self.betweenness_top(limit=5),
         )
+
+    # -- rich attack-surface views (the richer graph model) ----------------- #
+    def _nodes_by(self, label: str) -> list[str]:
+        return [n for n, d in self.g.nodes(data=True) if d.get("label") == label]
+
+    def _typed_neighbors(self, node_id: str, label: str, direction: str = "out") -> list[dict[str, Any]]:
+        edges = self.g.out_edges if direction == "out" else self.g.in_edges
+        out = []
+        for a, b, _ in edges(node_id, data=True):
+            other = b if direction == "out" else a
+            if self.g.nodes[other].get("label") == label:
+                out.append({"id": other, **{k: v for k, v in self.g.nodes[other].items() if k != "label"}})
+        return out
+
+    def risk_score(self, host_id: str) -> float:
+        """Heuristic host risk: exposure (open ports) + vulnerabilities + missing
+        web controls. Used to rank the attack surface."""
+        if not self.g.has_node(host_id):
+            return 0.0
+        ports = self._typed_neighbors(host_id, "Service")
+        vulns = self._typed_neighbors(host_id, "Vulnerability")
+        web = self._typed_neighbors(host_id, "WebEndpoint")
+        score = 1.5 * len(ports)
+        score += sum(_SEV_WEIGHT.get(str(v.get("severity", "unknown")).lower(), 0.5) for v in vulns)
+        score += 0.5 * len(web)
+        # internet-facing / public web service bumps exposure
+        if any(p.get("port") in (80, 443, 8080, 8443) for p in ports):
+            score += 2.0
+        return round(score, 2)
+
+    def exposure_view(self, host_id: str) -> dict[str, Any]:
+        """The full attack-surface picture for a host: services, technologies,
+        web endpoints, vulnerabilities, certificate, risk score."""
+        if not self.g.has_node(host_id):
+            return {"host": host_id, "present": False}
+        node = self.g.nodes[host_id]
+        services = self._typed_neighbors(host_id, "Service")
+        return {
+            "host": host_id,
+            "present": True,
+            "ip": node.get("ip"),
+            "os": node.get("os"),
+            "first_seen": node.get("first_seen"),
+            "last_seen": node.get("last_seen"),
+            "services": [{"port": s.get("port"), "protocol": s.get("protocol"),
+                          "service": s.get("service"), "product": s.get("product"),
+                          "version": s.get("version")} for s in services],
+            "technologies": [t.get("name") for t in self._typed_neighbors(host_id, "Technology")],
+            "web_endpoints": [{"url": w.get("url"), "status": w.get("status")}
+                              for w in self._typed_neighbors(host_id, "WebEndpoint")],
+            "vulnerabilities": [{"id": v.get("id"), "name": v.get("name"),
+                                 "severity": v.get("severity"), "cvss": v.get("cvss")}
+                                for v in self._typed_neighbors(host_id, "Vulnerability")],
+            "certificate": (self._typed_neighbors(host_id, "Certificate") or [None])[0],
+            "risk_score": self.risk_score(host_id),
+        }
+
+    def attack_surface(self, limit: int = 10) -> list[dict[str, Any]]:
+        """Hosts ranked by risk — the engagement's prioritised attack surface."""
+        hosts = self._nodes_by("Host") or self._nodes_by("Asset")
+        ranked = sorted(hosts, key=self.risk_score, reverse=True)[:limit]
+        out = []
+        for h in ranked:
+            v = self.exposure_view(h)
+            out.append({"host": h, "ip": v.get("ip"), "risk_score": v["risk_score"],
+                        "open_ports": len(v.get("services", [])),
+                        "vulns": len(v.get("vulnerabilities", [])),
+                        "technologies": v.get("technologies", [])[:6]})
+        return out
 
     # -- helpers ------------------------------------------------------------ #
     def _annotate(self, path: list[str]) -> list[dict[str, Any]]:

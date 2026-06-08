@@ -47,6 +47,8 @@ FINDING_SCHEMA: dict[str, Any] = {
         },
         "confidence_estimate": {"type": "number", "minimum": 0.0, "maximum": 1.0},
         "severity": {"enum": ["CRITICAL", "HIGH", "MEDIUM", "LOW", "INFO"]},
+        "exploitability": {"enum": ["none", "theoretical", "known-exploit", "poc",
+                                    "confirmed", "weaponized", "unknown"]},
     },
     "additionalProperties": True,
 }
@@ -81,5 +83,11 @@ def coerce_and_validate(finding: dict[str, Any]) -> tuple[bool, list[str], dict[
 
     top = set(map(str, f.get("evidence_refs", []) or []))
     f["evidence_refs"] = sorted(top | step_refs)
+
+    # Deterministic exploitability gate: cap LLM-inflated severities (e.g. a public
+    # key rated CRITICAL) down to an evidence-justified level. Never upgrades.
+    from ..scoring.severity import cap_severity
+    f, _ = cap_severity(f)
+
     ok, msgs = validate_finding(f)
     return ok, msgs, f

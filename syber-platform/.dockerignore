@@ -10,3 +10,7 @@
 *.joblib
 node_modules/
 infra/**/*.tar
+dist/
+*.tar
+*.tar.gz
+.scan_screenshots/

@@ -40,7 +40,7 @@ docker compose -f infra/docker-compose.kali.yml up -d neo4j postgres kafka
 # b) build the Kali agent image (first time only) ...
 docker compose -f infra/docker-compose.kali.yml build kali
 #    ... or load the pre-packaged image instead of building:
-#    docker load -i dist/syber-kali-image.tar.gz
+#    docker load -i ~/syber-dist/syber-kali-image.tar.gz
 
 # c) open Claude Code inside Kali (this drops you into the agent)
 docker compose -f infra/docker-compose.kali.yml run --rm kali
@@ -60,10 +60,16 @@ Type natural language, or use the slash commands. Examples:
 | Goal | Do this |
 |---|---|
 | **Active scan** a host you control | `/syber-scan scanme.nmap.org` |
-| **Passive recon** of a website | `/syber-recon example.com` |
+| **Browser recon** of a website | `/syber-recon example.com` (real Chrome, **never curl**) |
 | **Browse / test** a web app | `open https://example.com and snapshot the page`, then ask it to click/fill/screenshot |
 | **Seeded investigation** demo | `/syber-investigate demo` |
 | **Check status / integrity** | `/syber-status` |
+
+> All web interaction goes through a **real browser** (`agent-browser` + Chrome) — genuine TLS
+> fingerprint and User-Agent, JavaScript rendered — so targets don't flag it as a bot. The agent
+> is instructed never to use `curl`/`wget`/`urllib` for web content. Scans and recon ingest into a
+> rich **Neo4j attack-surface graph** (hosts · services · technologies · web endpoints · vulns ·
+> certificates · findings, with risk scoring); `syber_get_graph_context` reads it back.
 
 A typical engagement: authorise a target → `/syber-scan` it → the agent ingests the open
 ports/services/vulns into Neo4j → it opens the discovered web service in the browser to inspect
@@ -155,6 +161,5 @@ syberAgent/
 │   ├── syber/               # python package (graph, harness, analytics, scanning, recon, scoring)
 │   ├── infra/kali/          # Kali Dockerfile + baked Claude Code workspace
 │   ├── infra/docker-compose.kali.yml
-│   └── dist/syber-kali-image.tar.gz   # packaged image
 └── claude-code/             # Claude Code plugin marketplace (the `syber` plugin lives here)
 ```

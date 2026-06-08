@@ -17,7 +17,7 @@ from __future__ import annotations
 import os
 from typing import Any
 
-from .store import KnowledgeGraph
+from .store import KnowledgeGraph, _now
 
 
 class Neo4jKnowledgeGraph(KnowledgeGraph):
@@ -40,11 +40,17 @@ class Neo4jKnowledgeGraph(KnowledgeGraph):
     def add_node(self, node_id: str, label: str, **props: Any) -> None:
         super().add_node(node_id, label, **props)
         safe_label = "".join(c for c in label if c.isalnum()) or "Entity"
-        props = {**props, "id": node_id}
+        # Only persist non-null props; set first_seen once, last_seen every time.
+        props = {k: v for k, v in props.items() if v is not None}
+        props["id"] = node_id
         try:
             with self._driver.session(database=self._database) as s:
-                s.run(f"MERGE (n:`{safe_label}` {{id: $id}}) SET n += $props",
-                      id=node_id, props=props)
+                s.run(
+                    f"MERGE (n:`{safe_label}` {{id: $id}}) "
+                    f"ON CREATE SET n.first_seen = $now "
+                    f"SET n += $props, n.last_seen = $now",
+                    id=node_id, props=props, now=_now(),
+                )
         except Exception:  # noqa: BLE001 - mirror already updated
             pass
 

@@ -20,8 +20,10 @@ from ..harness.injection_guard import build_structured_query
 from ..harness.schema_validator import coerce_and_validate
 from ..llm.client import get_client
 from ..scoring.gate import gate_candidate
+from ..scoring.severity import SEVERITY_RUBRIC
 from ..tools.scope_guard import InvestigationScope, set_current_scope
-from .site_recon import recon_site
+from .browser_recon import ingest_recon_to_graph
+from .browser_recon import recon_site as recon_site
 
 ANALYSIS_INSTRUCTIONS = (
     "You are the Syber threat investigator. You are given a PASSIVE reconnaissance report "
@@ -34,8 +36,9 @@ ANALYSIS_INSTRUCTIONS = (
     "  evidence_refs: distinct refs used (>=3).\n"
     "  mitre_techniques: array of T-IDs (e.g. T1595, T1592, T1190).\n"
     "  confidence_estimate: 0..1.\n"
-    "  severity: one of CRITICAL/HIGH/MEDIUM/LOW/INFO — proportionate to what was actually "
-    "found (missing HSTS alone is LOW/INFO; an exposed /.git or /.env is HIGH+).\n"
+    "  exploitability: one of none/theoretical/known-exploit/poc/confirmed/weaponized/unknown.\n"
+    "  severity: one of CRITICAL/HIGH/MEDIUM/LOW/INFO — assigned per the rubric below.\n\n"
+    + SEVERITY_RUBRIC
 )
 
 
@@ -52,6 +55,7 @@ def investigate_site(site: str) -> dict:
     addrs = report.get("dns", {}).get("addresses", [])
     scope = InvestigationScope(investigation_id=f"RECON-{host}", allowed_entities={host, *addrs})
     set_current_scope(scope)
+    ingest_recon_to_graph(report)
     get_audit_log().write("site_recon", {"host": host, "risks": report.get("risk_indicators", [])})
 
     prompt = build_structured_query(ANALYSIS_INSTRUCTIONS, [json.dumps(report, default=str)])
@@ -72,18 +76,20 @@ def main(argv: list[str]) -> int:
     assert_configured()
     site = argv[1] if len(argv) > 1 else "example.com"
     print(f"LLM: DeepSeek V4 ({LLM.resolve_model(LLM.orchestrator_model)}) — direct API, no LiteLLM\n")
-    print(f"=== Passive recon: {site} ===")
+    print(f"=== Browser recon (real Chrome, not curl): {site} ===")
     out = investigate_site(site)
     r = out["report"]
+    print(f"method         : {r.get('method')}")
     print(f"host           : {r['host']}  ->  {r.get('dns', {}).get('addresses')}")
     http = r.get("http", {})
     print(f"http           : status={http.get('status')}  server={http.get('server')}  title={http.get('title')!r}")
-    print(f"sec headers    : present={list(http.get('security_headers_present', {}))}")
-    print(f"               : missing={http.get('security_headers_missing')}")
+    print(f"UA seen by site: {(http.get('request_user_agent') or '')[:60]}")
+    print(f"technology     : {http.get('technology')}")
+    print(f"forms/inputs   : forms={http.get('forms')} inputs={http.get('inputs')} links={http.get('links')}")
+    print(f"sec hdr missing: {http.get('security_headers_missing')}")
     tls = r.get("tls", {})
-    if tls:
+    if tls and not tls.get("error"):
         print(f"tls            : issuer={tls.get('issuer')}  valid_to={tls.get('valid_to')}  {tls.get('tls_version')}")
-    print(f"exposed paths  : {r.get('exposed_paths')}")
     print(f"risk indicators: {r.get('risk_indicators')}")
 
     print("\n=== DeepSeek finding ===")

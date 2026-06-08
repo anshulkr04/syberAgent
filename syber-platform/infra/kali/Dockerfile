@@ -17,11 +17,13 @@ SHELL ["/bin/bash", "-c"]
 RUN apt-get update && apt-get install -y --no-install-recommends \
       nmap nikto gobuster ffuf masscan nuclei sslscan whatweb \
       dnsutils whois netcat-traditional iproute2 \
-      seclists wordlists \
       python3 python3-venv python3-pip \
       curl git ca-certificates jq xz-utils sudo \
-      chromium fonts-liberation fonts-noto-color-emoji \
+      chromium fonts-liberation \
  && rm -rf /var/lib/apt/lists/*
+# Slim: the multi-hundred-MB seclists/wordlists packages are omitted. Content
+# discovery uses a bundled common-path list (active_scan.BUILTIN_WORDLIST); for a
+# full wordlist on a real engagement run `sudo apt-get install -y seclists` in-container.
 
 # Point agent-browser at the system chromium (no per-user Chrome download needed).
 ENV AGENT_BROWSER_EXECUTABLE_PATH=/usr/bin/chromium
@@ -53,8 +55,8 @@ USER syber
 WORKDIR /home/syber/workspace
 ENV HOME=/home/syber
 
-# Prefetch nuclei templates so the first vuln scan is fast (best-effort).
-RUN nuclei -update-templates >/dev/null 2>&1 || true
+# Templates are NOT prefetched (saves ~hundreds of MB); nuclei downloads them on
+# its first run. To prefetch on a fat-disk host, run `nuclei -update-templates`.
 
 COPY --chown=syber:syber infra/kali/entrypoint.sh /usr/local/bin/syber-entrypoint
 USER root

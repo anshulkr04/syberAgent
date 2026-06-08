@@ -36,10 +36,17 @@ def get_graph_context(args: dict[str, Any]) -> dict[str, Any]:
     audit.write_tool_call("get_graph_context", args, scope)
     graph = get_graph()
     if not graph.has(entity_id):
-        return {"entity_id": entity_id, "note": "entity not present in knowledge graph", "neighbors": []}
+        return {"entity_id": entity_id, "note": "entity not present in knowledge graph",
+                "neighbors": [], "attack_surface": graph.attack_surface(limit=5)}
 
     ctx = graph.get_context(entity_id, k_paths=int(args.get("k_paths", 5)))
-    return ctx.to_dict()
+    result = ctx.to_dict()
+    # Enrich with the rich attack-surface model: the host's full exposure
+    # (services, technologies, web endpoints, vulns, certificate, risk score)
+    # plus the engagement-wide ranked attack surface.
+    result["exposure"] = graph.exposure_view(entity_id)
+    result["attack_surface"] = graph.attack_surface(limit=5)
+    return result
 
 
 def get_tool() -> ToolSpec:

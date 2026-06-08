@@ -18,6 +18,7 @@ Every scan calls _require_authorized(target) first. Default-deny.
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import socket
 import subprocess
@@ -28,16 +29,36 @@ from typing import Any
 
 from .authorization import get_auth_store
 
+
+def _env_timeout(default: int) -> int:
+    """Resolve a scan timeout (seconds). `SYBER_SCAN_TIMEOUT`, if set >0, overrides
+    the per-stage default — scans take time and the operator may need longer."""
+    try:
+        v = int(os.environ.get("SYBER_SCAN_TIMEOUT", "0"))
+    except ValueError:
+        v = 0
+    return v if v > 0 else default
+
 # Reasonable common-port set for the pure-python fallback scanner.
 COMMON_PORTS = [21, 22, 23, 25, 53, 80, 110, 111, 135, 139, 143, 389, 443, 445,
                 465, 587, 993, 995, 1433, 1723, 2049, 3306, 3389, 5432, 5900,
                 5985, 6379, 8000, 8080, 8443, 8888, 9200, 11211, 27017]
 
-# A small built-in wordlist so content discovery works without system wordlists.
+# Built-in common-path list so content discovery works without seclists/wordlists
+# (the image is slimmed; `sudo apt-get install seclists` for a full list).
 BUILTIN_WORDLIST = [
-    "admin", "login", "dashboard", "api", "uploads", "backup", "config", "test",
-    ".git", ".env", "robots.txt", "sitemap.xml", "wp-admin", "phpinfo.php",
-    "server-status", "actuator", "swagger", "graphql", ".well-known/security.txt",
+    "admin", "administrator", "login", "logout", "signin", "register", "dashboard",
+    "api", "api/v1", "api/v2", "graphql", "rest", "wp-admin", "wp-login.php",
+    "wp-content", "wp-json", "user", "users", "account", "profile", "settings",
+    "config", "config.php", "configuration", "setup", "install", "phpinfo.php",
+    "info.php", "test", "test.php", "debug", "dev", "staging", "backup", "backups",
+    "bak", "old", "tmp", "temp", "uploads", "upload", "files", "download", "assets",
+    "static", "images", "img", "css", "js", "console", "actuator", "actuator/health",
+    "metrics", "status", "server-status", "server-info", "health", "swagger",
+    "swagger-ui", "swagger.json", "openapi.json", "robots.txt", "sitemap.xml",
+    ".git", ".git/HEAD", ".git/config", ".env", ".env.local", ".env.production",
+    ".htaccess", ".htpasswd", ".svn", ".DS_Store", "web.config", "phpmyadmin",
+    "adminer.php", "db", "database", "sql", ".well-known/security.txt", "cgi-bin",
 ]
 
 
@@ -70,8 +91,9 @@ def _run(cmd: list[str], timeout: int) -> tuple[int, str, str]:
 # --------------------------------------------------------------------------- #
 # Port scan
 # --------------------------------------------------------------------------- #
-def port_scan(target: str, ports: str | None = None, timeout: int = 300) -> dict[str, Any]:
+def port_scan(target: str, ports: str | None = None, timeout: int | None = None) -> dict[str, Any]:
     """nmap TCP connect scan (no root needed). Falls back to a python scanner."""
+    timeout = _env_timeout(300 if timeout is None else timeout)
     _require_authorized(target)
     if _have("nmap"):
         cmd = ["nmap", "-sT", "-Pn", "-T4", "-oX", "-"]
@@ -145,8 +167,9 @@ def _parse_nmap_xml(xml: str) -> dict[str, Any]:
 # --------------------------------------------------------------------------- #
 # Service / version + NSE default scripts
 # --------------------------------------------------------------------------- #
-def service_scan(target: str, ports: str | None = None, timeout: int = 420) -> dict[str, Any]:
+def service_scan(target: str, ports: str | None = None, timeout: int | None = None) -> dict[str, Any]:
     """nmap -sV -sC: service versions + safe default NSE scripts."""
+    timeout = _env_timeout(420 if timeout is None else timeout)
     _require_authorized(target)
     if not _have("nmap"):
         return {"tool": "nmap", "available": False, "note": "nmap not installed; use port_scan fallback"}
@@ -162,7 +185,8 @@ def service_scan(target: str, ports: str | None = None, timeout: int = 420) -> d
 # --------------------------------------------------------------------------- #
 # Web vulnerability scan (nikto)
 # --------------------------------------------------------------------------- #
-def web_scan(target: str, timeout: int = 300) -> dict[str, Any]:
+def web_scan(target: str, timeout: int | None = None) -> dict[str, Any]:
+    timeout = _env_timeout(300 if timeout is None else timeout)
     _require_authorized(target)
     if not _have("nikto"):
         return {"tool": "nikto", "available": False, "note": "nikto not installed"}
@@ -177,7 +201,8 @@ def web_scan(target: str, timeout: int = 300) -> dict[str, Any]:
 # --------------------------------------------------------------------------- #
 # Content discovery (gobuster -> ffuf -> none)
 # --------------------------------------------------------------------------- #
-def content_discovery(target: str, wordlist: str | None = None, timeout: int = 240) -> dict[str, Any]:
+def content_discovery(target: str, wordlist: str | None = None, timeout: int | None = None) -> dict[str, Any]:
+    timeout = _env_timeout(240 if timeout is None else timeout)
     _require_authorized(target)
     url = _as_url(target)
     wl = wordlist or _ensure_wordlist()
@@ -210,7 +235,8 @@ def content_discovery(target: str, wordlist: str | None = None, timeout: int = 2
 # --------------------------------------------------------------------------- #
 # Templated vulnerability scan (nuclei)
 # --------------------------------------------------------------------------- #
-def vuln_scan(target: str, severity: str = "low,medium,high,critical", timeout: int = 420) -> dict[str, Any]:
+def vuln_scan(target: str, severity: str = "low,medium,high,critical", timeout: int | None = None) -> dict[str, Any]:
+    timeout = _env_timeout(420 if timeout is None else timeout)
     _require_authorized(target)
     if not _have("nuclei"):
         return {"tool": "nuclei", "available": False, "note": "nuclei not installed"}
@@ -235,9 +261,10 @@ def vuln_scan(target: str, severity: str = "low,medium,high,critical", timeout: 
 # --------------------------------------------------------------------------- #
 # Orchestrated full scan + graph ingestion
 # --------------------------------------------------------------------------- #
-def full_scan(target: str, do_web: bool = True, timeout_each: int = 300) -> dict[str, Any]:
+def full_scan(target: str, do_web: bool = True, timeout_each: int | None = None) -> dict[str, Any]:
     """Port + service scan; if web ports are open, content discovery + nuclei.
     Ingests the result into the knowledge graph (Neo4j when configured)."""
+    timeout_each = _env_timeout(300 if timeout_each is None else timeout_each)
     _require_authorized(target)
     result: dict[str, Any] = {"target": target, "stages": {}}
     svc = service_scan(target, timeout=timeout_each + 120)
@@ -258,34 +285,38 @@ def full_scan(target: str, do_web: bool = True, timeout_each: int = 300) -> dict
 
 def ingest_scan_to_graph(target: str, port_result: dict[str, Any],
                          vuln_result: dict[str, Any] | None = None) -> dict[str, Any]:
-    """Write hosts/ports/services/vulns into the knowledge graph (spec §6)."""
+    """Write the scan into the rich attack-surface graph model (spec §6)."""
+    from ..graph import model
     from ..graph.store import get_graph
 
     g = get_graph()
     ip = port_result.get("ip") or target
-    host_id = target
-    g.add_node(host_id, "Asset", hostname=target, ip=ip, asset_class="scanned_host")
-    if ip and ip != host_id:
-        g.add_node(ip, "Asset", hostname=target, ip=ip, asset_class="ip_endpoint")
-        g.add_edge(host_id, ip, "RESOLVES_TO", edge_weight=1.0)
+    # Derive a coarse OS hint from any nmap service banners.
+    os_hint = next((p.get("product") for p in port_result.get("open_ports", [])
+                    if p.get("product") and "ubuntu" in str(p.get("version", "")).lower()), None)
+    model.upsert_host(target, ip=ip, os=("linux" if os_hint else None), source="active_scan")
 
-    n_ports = 0
+    n_ports = n_tech = 0
     for p in port_result.get("open_ports", []):
-        pid = f"{ip}:{p['port']}"
-        g.add_node(pid, "Service", port=p["port"], protocol=p.get("protocol"),
-                   service=p.get("service"), product=p.get("product"), version=p.get("version"))
-        g.add_edge(ip if ip in g.g else host_id, pid, "HAS_PORT", edge_weight=0.5)
+        sid = model.upsert_service(target, p["port"], protocol=p.get("protocol", "tcp"),
+                                   service=p.get("service"), product=p.get("product"),
+                                   version=p.get("version"), cpe=p.get("cpe"),
+                                   scripts=p.get("scripts"))
         n_ports += 1
+        # A product banner (e.g. "Apache httpd") is a technology signal.
+        if p.get("product"):
+            model.upsert_technology(sid, p["product"], version=p.get("version"), category="service")
+            n_tech += 1
 
     n_vulns = 0
     for f in (vuln_result or {}).get("findings", []):
         vid = f.get("template") or f.get("name") or "vuln"
-        g.add_node(vid, "Vulnerability", cve_id=vid, name=f.get("name"),
-                   severity=f.get("severity"))
-        g.add_edge(host_id, vid, "HAS_VULN", edge_weight=0.3, weaponised=False)
+        model.upsert_vulnerability(target, vid, name=f.get("name"),
+                                   severity=f.get("severity", "unknown"), source="nuclei")
         n_vulns += 1
 
-    return {"host": host_id, "ip": ip, "ports_ingested": n_ports, "vulns_ingested": n_vulns,
+    return {"host": target, "ip": ip, "ports_ingested": n_ports, "tech_ingested": n_tech,
+            "vulns_ingested": n_vulns, "risk_score": g.risk_score(target),
             "backend": type(g).__name__}
 
 

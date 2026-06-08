@@ -21,6 +21,7 @@ from ..harness.injection_guard import build_structured_query
 from ..harness.schema_validator import coerce_and_validate
 from ..llm.client import get_client
 from ..scoring.gate import gate_candidate
+from ..scoring.severity import SEVERITY_RUBRIC
 from ..tools.scope_guard import InvestigationScope, set_current_scope
 from .active_scan import ingest_scan_to_graph, service_scan
 from .authorization import get_auth_store
@@ -32,9 +33,10 @@ INSTRUCTIONS = (
     "description, status:'confirmed', mitre_technique (ATT&CK T-ID e.g. T1046 Network Service "
     "Discovery, T1190 Exploit Public-Facing Application, T1210 Exploitation of Remote "
     "Services), evidence_refs:[e.g. 'scan:port:22','scan:service:http']}); evidence_refs "
-    "(>=3 distinct); mitre_techniques (T-IDs); confidence_estimate (0..1); severity "
-    "(CRITICAL/HIGH/MEDIUM/LOW/INFO — proportionate: open SSH alone is LOW; an outdated "
-    "service with known CVEs is higher)."
+    "(>=3 distinct); mitre_techniques (T-IDs); confidence_estimate (0..1); "
+    "exploitability (none/theoretical/known-exploit/poc/confirmed/weaponized/unknown); "
+    "severity (CRITICAL/HIGH/MEDIUM/LOW/INFO — assigned per the rubric below).\n\n"
+    + SEVERITY_RUBRIC
 )
 
 
