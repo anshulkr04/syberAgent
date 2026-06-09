@@ -1,0 +1,47 @@
+{
+  "version": 1,
+  "skills": {
+    "agent-email-patterns": {
+      "source": "agentmail-to/agentmail-skills",
+      "sourceType": "github",
+      "skillPath": "agent-email-patterns/SKILL.md",
+      "computedHash": "69847e7c37d84fce3e367c18b3b709078bf5d27df5d4bdc14e46bd4ae69705e8"
+    },
+    "agentmail": {
+      "source": "agentmail-to/agentmail-skills",
+      "sourceType": "github",
+      "skillPath": "agentmail/SKILL.md",
+      "computedHash": "c4056c9eaf5c01ed9aebdca1abe5926b08695bb71cb8ad0128b29af3c6530f3d"
+    },
+    "agentmail-cli": {
+      "source": "agentmail-to/agentmail-skills",
+      "sourceType": "github",
+      "skillPath": "agentmail-cli/SKILL.md",
+      "computedHash": "847abb85ea17b248c48128afcd18dbea6497294c51131acef452d2624d6e9c6c"
+    },
+    "agentmail-mcp": {
+      "source": "agentmail-to/agentmail-skills",
+      "sourceType": "github",
+      "skillPath": "agentmail-mcp/SKILL.md",
+      "computedHash": "1bc1091acec0561b0335d459fbc3eafc62b6a3de66f57cfabb9d85f2abe13c87"
+    },
+    "agentmail-sdk": {
+      "source": "agentmail-to/agentmail-skills",
+      "sourceType": "github",
+      "skillPath": "agentmail-sdk/SKILL.md",
+      "computedHash": "6f1519c1223e1976dd9b6efa8d23628c9e23621da0aba63b47173874677c80b0"
+    },
+    "agentmail-toolkit": {
+      "source": "agentmail-to/agentmail-skills",
+      "sourceType": "github",
+      "skillPath": "agentmail-toolkit/SKILL.md",
+      "computedHash": "80c278cec21503530ddf573a86e20f19763a366211f5bf0eca009f99f27190b4"
+    },
+    "email-for-ai-agents": {
+      "source": "agentmail-to/agentmail-skills",
+      "sourceType": "github",
+      "skillPath": "email-for-ai-agents/SKILL.md",
+      "computedHash": "d992abad0448ad31b8bae70d1934d8a94ac615587fc51439fc79dcee605a511f"
+    }
+  }
+}

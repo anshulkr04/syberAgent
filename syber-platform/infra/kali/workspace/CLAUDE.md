@@ -61,16 +61,32 @@ the application layer:
 1. **Map the app** — `syber_crawl` enumerates endpoints, forms, and **parameters** (pass `cookies`
    to reach authenticated areas). Identify every object-bearing endpoint (an `id`, `user`, `order`,
    `doc`, `invoice`, `org_id`, …).
-2. **Access control / IDOR-BOLA (the priority — OWASP API #1).** `syber_test_access_control` on
+2. **Register real test accounts — do NOT stop at the unauthenticated surface.** Most real bugs
+   (IDOR/BOLA above all) only appear *after login*. If the app has signup/login, provision your
+   own identities and register them on the target's own signup form — this is the difference
+   between "looks safe" and actually testing it:
+     a. `syber_provision_identity label="A"` and again `label="B"` → two real inboxes
+        (`{email, inbox_id}`). Add `want_phone=true` if signup needs SMS verification.
+     b. Submit the target's signup form with each email (via `agent-browser` for JS forms, or
+        `syber_http_request`).
+     c. `syber_check_inbox <inbox_id> wait_seconds=90` → grab the verification **link** or **OTP**
+        (and `syber_read_sms` for an SMS OTP) and complete each signup.
+     d. Log in as A and as B; capture each session's **Cookie** header. These are your
+        `cookies_a` / `cookies_b` for the next step.
+   *These identity tools touch only the agent's own AgentMail/AgentPhone account, never the
+   target, so they need no target authorisation — but you still must be authorised to test the
+   target you register on.*
+3. **Access control / IDOR-BOLA (the priority — OWASP API #1).** `syber_test_access_control` on
    each object endpoint. **Two accounts give the strongest signal**: pass `cookies_a` (owner) and
-   `cookies_b` (attacker) — if B retrieves A's object, BOLA is confirmed. Without two accounts,
-   harvest ids from list endpoints and pass `known_other_ids`. Reason about all six BOLA families:
+   `cookies_b` (attacker, from step 2) — if B retrieves A's object, BOLA is confirmed. Without two
+   accounts, harvest ids from list endpoints and pass `known_other_ids`. Reason about all six BOLA
+   families:
    direct-object-reference, action-level (PATCH/DELETE another's object), tenant isolation (swap
    `org_id`), workflow-context (archived/deleted objects), chained disclosure, object rebinding
    (tamper `owner_id` in the body) — use `syber_http_request` to craft these.
-3. **Injection.** `syber_test_injection` on parameterised endpoints — reflected XSS, error-based
+4. **Injection.** `syber_test_injection` on parameterised endpoints — reflected XSS, error-based
    SQLi, SSRF (non-destructive). **Confirm** before reporting; one unverified signal is not a finding.
-4. **Manual probing.** `syber_http_request` for auth-bypass, forced browsing, method tampering,
+5. **Manual probing.** `syber_http_request` for auth-bypass, forced browsing, method tampering,
    parameter pollution that the automated tools suggest.
 
 Call `syber_pentest_plan <target>` to get the full Pentest Task Tree and work it top-to-bottom.
@@ -89,6 +105,9 @@ deliberately N/A:
 - [ ] **Vulns** — nuclei run against each web service.
 - [ ] **Browser** — `agent-browser` opened + snapshotted each discovered web service; forms/
       auth/inputs inspected; evidence screenshotted.
+- [ ] **App / authenticated** — if the app has signup/login: registered ≥2 test accounts
+      (`syber_provision_identity`), ran `syber_crawl` + `syber_test_access_control` + `syber_test_injection`
+      **logged in**. "No login means no IDOR test" is NOT an acceptable reason to skip — provision and test.
 - [ ] **Graph** — `syber_get_graph_context` reviewed; attack surface reconciled with findings.
 
 If a tool times out, RE-RUN it with a longer timeout (`SYBER_SCAN_TIMEOUT`) or narrower scope
@@ -104,4 +123,9 @@ after any compaction.
   service_scan, web_scan, content_discovery, vuln_scan, full_scan, recon_site (browser-based),
   **pentest_plan, crawl, test_access_control (IDOR/BOLA), test_injection (XSS/SQLi/SSRF),
   http_request**, get_graph_context, publish_finding, gate_finding, backend_status, verify_integrity.
+- **Identity provisioning (for authenticated/IDOR testing):** `syber_provision_identity` (real
+  email inbox ± phone), `syber_check_inbox` (verification link/OTP from signup mail),
+  `syber_read_sms` (SMS OTP), `syber_phone_status`. Backed by AgentMail/AgentPhone; the `agentmail`
+  skill in `.claude/skills/` documents the raw API. These touch only the agent's own comms
+  accounts — receive-only, never the target.
 - **Backends:** Neo4j graph (`neo4j:7687`), Postgres memory, Kafka bus, DeepSeek V4.

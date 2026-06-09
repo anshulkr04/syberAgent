@@ -9,7 +9,13 @@
         "NEO4J_PASSWORD": "${NEO4J_PASSWORD:-changeme}",
         "DATABASE_URL": "${DATABASE_URL:-postgresql://postgres:changeme@postgres:5432/syber_memory}",
         "KAFKA_BOOTSTRAP": "${KAFKA_BOOTSTRAP:-kafka:9092}",
-        "DEEPSEEK_API_KEY": "${DEEPSEEK_API_KEY}"
+        "DEEPSEEK_API_KEY": "${DEEPSEEK_API_KEY}",
+        "AGENTMAIL_API_KEY": "${AGENTMAIL_API_KEY:-}",
+        "AGENTPHONE_API_KEY": "${AGENTPHONE_API_KEY:-}",
+        "AGENTPHONE_AGENT_ID": "${AGENTPHONE_AGENT_ID:-}",
+        "AGENTPHONE_NUMBER_ID": "${AGENTPHONE_NUMBER_ID:-}",
+        "AGENTPHONE_NUMBER": "${AGENTPHONE_NUMBER:-}",
+        "SYBER_OPERATOR_PHONE": "${SYBER_OPERATOR_PHONE:-}"
       }
     }
   }

@@ -45,6 +45,7 @@ COPY --chown=syber:syber . /opt/syber-platform
 RUN /opt/venv/bin/pip install --no-cache-dir --upgrade pip \
  && /opt/venv/bin/pip install --no-cache-dir -e /opt/syber-platform \
  && /opt/venv/bin/pip install --no-cache-dir mcp neo4j "psycopg[binary]" confluent-kafka pyyaml \
+ && /opt/venv/bin/pip install --no-cache-dir agentmail \
  && chown -R syber:syber /opt/venv
 
 # --- Baked project workspace (project-level .claude/ + .mcp.json) ------------

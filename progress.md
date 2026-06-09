@@ -444,7 +444,90 @@ Kali image — rebuild before using them in the container:
 
 ---
 
-*Bottom line for the next session: free disk space first (§8), then complete the §7 steps
-(small edits + host verification), then rebuild the slimmed Kali image. Everything else is built,
-verified, and documented above. §11 added the web-app pentest layer (IDOR/BOLA + injection + PTT);
-§12 added ephemeral teardown (wipe graph + memory + bus + artefacts when the agent closes).*
+## 13. Identity provisioning for IDOR/BOLA — AgentMail + AgentPhone (2026-06-08)
+
+**Problem:** the agent kept concluding "site is safe" because it stopped at the *unauthenticated*
+surface. Real IDOR/BOLA needs **two verified accounts** (fetch A's object as B), and signup
+confirmation arrives by email link or SMS OTP — which the agent had no way to receive. This layer
+gives it its own inboxes + a phone number to register real test accounts on the target.
+
+**New package `syber/integrations/`** (stdlib urllib, no new runtime deps):
+- `__init__.py` — `http_json()` helper, `IntegrationError` / `IntegrationNotConfigured`, `env()`.
+  Documents the SCOPE BOUNDARY (see below).
+- `agentmail.py` — REST client for https://api.agentmail.to (Bearer `AGENTMAIL_API_KEY`):
+  `create_inbox` (idempotent via client_id), `delete_inbox`, `list_inboxes`, `list_messages`,
+  `get_message` (URL-encodes the RFC822 Message-ID), `wait_for_message` (poll, falls back to the
+  list summary if get_message fails), `extract_links` (verify-link-first), `extract_otp`.
+  `inbox_id` IS the address.
+- `agentphone.py` — REST client for https://api.agentphone.ai (Bearer `AGENTPHONE_API_KEY`):
+  `signup`/`verify` (one-time bootstrap), `status`, `read_sms`, `wait_for_sms`, `extract_otp`.
+  Outbound `notify_operator_sms`/`call_operator` are **operator-only** (guard `_assert_operator`
+  refuses any number != `SYBER_OPERATOR_PHONE`).
+- `identity.py` — `provision_identity(label, want_phone)` → `{email, inbox_id, phone, number_id}`;
+  `harvest_verification(inbox_id, want_sms)` → `{email_links, email_otp, sms_otp}`.
+
+**SCOPE BOUNDARY (deliberate):** these touch only the agent's OWN AgentMail/AgentPhone account,
+never the target — so they are NOT behind the target-auth gate (the gate still governs the target).
+Inbound is fully enabled (receive signup mail / OTP). **Outbound calling/SMS to arbitrary numbers
+is NOT exposed** — that is vishing/smishing, a separate consent domain; outbound is library-only and
+restricted to the operator's own number for the consensual "call me" notification.
+
+**4 new MCP tools** (mcp_server.py, via `_integration()` wrapper — actionable error on missing key):
+`syber_provision_identity`, `syber_check_inbox`, `syber_read_sms`, `syber_phone_status`. Total
+syber_ tools now 29.
+
+**Skill:** `npx skills add agentmail-to/agentmail-skills` installed on host
+(`.claude/skills/`); the `agentmail` + `agent-email-patterns` skills baked into the container
+workspace (`infra/kali/workspace/.claude/skills/`). `agentmail` pip pkg added to the Dockerfile venv.
+
+**Wiring:** keys flow `syberAgent/.env` → compose `env_file` → container; passed through both
+`.mcp.json` files (workspace + plugin). Both `AGENTMAIL_API_KEY` and the full AgentPhone cred set
+are now in `.env` (gitignored, outside the git root `/Users/anshulkumar/syberAgent`). AgentPhone
+was bootstrapped via `scripts/syber_phone_signup.sh --auto` (creates a throwaway AgentMail inbox,
+self-reads the emailed OTP, verifies) → provisioned number **+17017867337**
+(`AGENTPHONE_AGENT_ID` / `AGENTPHONE_NUMBER_ID` in `.env`).
+
+**Free-tier caps (operational):** AgentMail free = **3 inboxes** — the agent must `delete_inbox`
+test identities after use (IDOR wants 2 fresh per target). AgentPhone free = 10 numbers /
+1000 SMS / 250 voice-min per month.
+
+**Live-testing bug fixes (all fixed + verified):**
+1. `get_message` 400 — RFC822 Message-IDs contain `<…@…>`; URL-encode the path segment (+ fall
+   back to the list summary in `wait_for_message`).
+2. Stale OTP — a fixed `client_id` made AgentMail REUSE the inbox, so old OTP emails were read;
+   `syber_phone_signup.sh` now uses a unique (timestamped) `client_id` → fresh inbox per signup.
+3. Cloudflare 1010 `browser_signature_banned` on AgentPhone `v1` GETs — the default
+   `Python-urllib` UA is banned; `http_json` now sends a real Chrome User-Agent.
+4. AgentPhone wraps SMS in a `data` key (not `messages`) — `read_sms` handles `data`/`messages`/`items`.
+
+**Docs taught the multi-account IDOR workflow:** workspace CLAUDE.md (new step 2 "Register real
+test accounts", coverage-checklist item "App / authenticated", capabilities list), `/syber-pentest`
+(new step 5), `syber-scanner` agent (frontmatter tools + protocol step b). Plugin copies synced.
+
+**Verified (host, 2026-06-08):** live AgentMail provisioned + deleted real inboxes; AgentPhone
+`status()` + `read_sms()` return live data over the provisioned number; 10 new integration tests +
+22 webapp tests pass (30 total in the integration dir); `py_compile` clean. (`mcp` is container-only,
+so mcp_server is import-checked in-container, not on host py3.14.)
+
+**REBUILT & VERIFIED IN-CONTAINER (2026-06-08):** `docker compose -f infra/docker-compose.kali.yml
+build kali` succeeded. Inside `syber-kali:latest`: `syber/integrations/` present, `agentmail` SDK
+imports, skills `agent-browser`/`agent-email-patterns`/`agentmail` baked, all 4 identity MCP tools
+register, and `env_file` delivers `AGENTMAIL_API_KEY`(70 chars) + `AGENTPHONE_API_KEY` +
+`AGENTPHONE_NUMBER=+17017867337` → both `agentmail.configured()` and `agentphone.configured()`
+return True. Nothing left to rebuild for §13.
+
+---
+
+*Bottom line: the platform is built, the Kali image is rebuilt, and every layer is verified
+in-container — there is no outstanding build/setup step. §7 (severity/persistence/startup) done;
+§11 added the web-app pentest layer (IDOR/BOLA + injection + PTT); §12 added ephemeral teardown
+(wipe graph + memory + bus + artefacts when the agent closes); §13 added AgentMail/AgentPhone
+identity provisioning (number +17017867337 live) so the agent registers real accounts and runs
+authenticated IDOR/BOLA instead of stopping at the unauthenticated surface.*
+
+*Next session — actual engagement testing: run `./scripts/syber_session.sh` (or
+`./scripts/syber_engage.sh <target> "<attestation>"`) against an AUTHORISED app that has signup/login
+and a known IDOR, and confirm the agent (a) provisions two identities, (b) registers + verifies both
+via `syber_check_inbox`/`syber_read_sms`, (c) captures both sessions, (d) confirms the BOLA via
+`syber_test_access_control` — i.e. that the false-negative "site is safe" behaviour is actually
+gone end-to-end. Optionally set `SYBER_OPERATOR_PHONE` to enable the consensual completion call/SMS.*

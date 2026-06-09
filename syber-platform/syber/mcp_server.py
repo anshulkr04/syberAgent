@@ -42,6 +42,10 @@ from syber.recon.browser_recon import browser_available, ingest_recon_to_graph
 from syber.recon.browser_recon import recon_site as browser_recon_site
 from syber.response.executor import execute_playbook, mock_integration
 from syber.response.playbooks import CRED_REVOKE_PLAYBOOK, matches_trigger
+from syber.integrations import IntegrationError
+from syber.integrations import agentmail as _agentmail
+from syber.integrations import agentphone as _agentphone
+from syber.integrations import identity as _identity
 from syber.scanning import active_scan, webapp
 from syber.scanning.active_scan import NotAuthorized
 from syber.scanning.authorization import get_auth_store
@@ -164,6 +168,16 @@ def _scan(fn, *args, **kwargs) -> dict[str, Any]:
                           "authorised to test this target, then retry."}
 
 
+def _integration(fn, *args, **kwargs) -> dict[str, Any]:
+    """Run a comms-integration call (AgentMail / AgentPhone). These touch only the
+    agent's OWN accounts, never the target, so there is no target-auth gate — but a
+    missing API key surfaces as an actionable error, not a crash."""
+    try:
+        return fn(*args, **kwargs)
+    except IntegrationError as e:
+        return {"error": "integration", "message": str(e)}
+
+
 @mcp.tool()
 def syber_authorize_target(target: str, attestation: str, authorized_by: str = "operator") -> dict[str, Any]:
     """Authorise ACTIVE scanning of a target you control. Required before any
@@ -284,6 +298,59 @@ def syber_http_request(url: str, method: str = "GET", headers: dict[str, str] | 
     the browser is unavailable. The low-level primitive for manual web testing."""
     return _scan(webapp.http_request, url, method=method, headers=headers or None,
                  body=body or None, cookies=cookies or None)
+
+
+# --------------------------------------------------------------------------- #
+# Identity provisioning (AgentMail / AgentPhone) — for multi-account IDOR/BOLA
+# --------------------------------------------------------------------------- #
+@mcp.tool()
+def syber_provision_identity(label: str = "acct", want_phone: bool = False) -> dict[str, Any]:
+    """Stand up a fresh TEST IDENTITY for the agent — a real email inbox (always),
+    plus the provisioned phone number if `want_phone` and AgentPhone is configured.
+    Returns {email, inbox_id, phone, number_id}. Use it to REGISTER an account on the
+    AUTHORISED target's own signup form: provision two identities (label 'A' and 'B'),
+    register both, then feed their session cookies to syber_test_access_control to
+    prove IDOR/BOLA. Touches only the agent's own AgentMail/AgentPhone account, never
+    the target — no target authorisation needed to provision."""
+    return _integration(_identity.provision_identity, label=label, want_phone=want_phone)
+
+
+@mcp.tool()
+def syber_check_inbox(inbox_id: str, match: str = "", wait_seconds: int = 60) -> dict[str, Any]:
+    """Read a provisioned inbox to complete a target signup: waits up to
+    `wait_seconds` for a (optionally `match`-substring) message, then returns the
+    extracted verification {email_links, email_otp, raw_subject}. Call this right
+    after submitting the target's signup form to grab the confirmation link / OTP."""
+    if wait_seconds > 0:
+        return _integration(_identity.harvest_verification, inbox_id, timeout=wait_seconds)
+    msgs = _integration(_agentmail.list_messages, inbox_id, limit=10)
+    return {"messages": msgs} if not isinstance(msgs, dict) else msgs
+
+
+@mcp.tool()
+def syber_read_sms(match: str = "", wait_seconds: int = 60) -> dict[str, Any]:
+    """Read inbound SMS on the agent's provisioned number to capture a signup OTP:
+    waits up to `wait_seconds` for a (optionally `match`) message and returns
+    {otp, body}. Requires AgentPhone configured. Receive-only — there is no tool to
+    send SMS/calls to arbitrary numbers."""
+    def _go() -> dict[str, Any]:
+        if wait_seconds > 0:
+            sms = _agentphone.wait_for_sms(match=match or None, timeout=wait_seconds)
+            if not sms:
+                return {"otp": None, "body": None, "note": "no SMS within wait window"}
+            return {"otp": _agentphone.extract_otp(sms), "body": _agentphone._sms_body(sms)}
+        return {"messages": _agentphone.read_sms(limit=10)}
+    return _integration(_go)
+
+
+@mcp.tool()
+def syber_phone_status() -> dict[str, Any]:
+    """Report whether AgentPhone is configured and the provisioned number's status."""
+    if not _agentphone.configured():
+        return {"configured": False,
+                "message": "AgentPhone not set up. Run scripts/syber_phone_signup.sh "
+                           "(one-time) and add the creds to .env."}
+    return _integration(_agentphone.status)
 
 
 @mcp.tool()
