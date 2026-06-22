@@ -297,13 +297,18 @@ def _python_fetch(url: str, method: str, headers: dict[str, str], body: str | No
 def http_request(url: str, method: str = "GET", headers: dict[str, str] | None = None,
                  body: str | None = None, cookies: str | None = None,
                  prefer_browser: bool = True, session: str | None = None,
-                 timeout: int = 30) -> dict[str, Any]:
+                 timeout: int = 30, waf: bool | None = None) -> dict[str, Any]:
     """Send a crafted HTTP request to an AUTHORISED target and return the response.
 
     Transport: the real browser is preferred (genuine fingerprint + live session),
     but if `cookies` are supplied explicitly (dual-session BOLA testing) or the
     browser is unavailable, the HTTP-client transport is used instead. Returns
-    {status, headers, body, length, transport}."""
+    {status, headers, body, length, transport}.
+
+    WAF traversal: if the response is a Cloudflare challenge and `waf` is enabled
+    (default: the SYBER_WAF env flag, on), the request is re-driven through the
+    syber.waf layered module (TLS impersonation -> session reuse -> challenge
+    solver) so the agent transparently gets past Cloudflare interstitials."""
     host = urlparse(url).netloc.split(":")[0]
     _require_authorized(host)
     headers = dict(headers or {})
@@ -312,8 +317,58 @@ def http_request(url: str, method: str = "GET", headers: dict[str, str] | None =
         sess = session or f"pt-{uuid.uuid4().hex[:8]}"
         out = _browser_fetch(url, method, headers, body, sess, timeout)
         if out is not None:
-            return out  # else fall through to the client transport
-    return _python_fetch(url, method, headers, body, cookies, timeout)
+            return _waf_escalate(url, method, headers, body, cookies, out, waf)
+    return _waf_escalate(url, method, headers, body, cookies,
+                         _python_fetch(url, method, headers, body, cookies, timeout), waf)
+
+
+def _waf_enabled(flag: bool | None) -> bool:
+    if flag is not None:
+        return flag
+    return os.environ.get("SYBER_WAF", "1") not in ("0", "false", "off", "")
+
+
+def _waf_escalate(url: str, method: str, headers: dict[str, str], body: str | None,
+                  cookies: str | None, out: dict[str, Any], flag: bool | None) -> dict[str, Any]:
+    """If `out` is a Cloudflare challenge, re-drive through syber.waf and return its
+    response; otherwise return `out` unchanged. Best-effort — any WAF error falls
+    back to the original challenge response so the caller still sees what happened."""
+    if not _waf_enabled(flag):
+        return out
+    try:
+        from ..waf import detect_challenge
+        from ..waf.integration import WAFBlockError
+    except Exception:  # noqa: BLE001 - waf module optional
+        return out
+    verdict = detect_challenge(out.get("status"), out.get("headers", {}), out.get("body", ""))
+    if not verdict.detected or not verdict.cloudflare or verdict.kind == "rate_limited":
+        return out
+    out["waf_challenge"] = verdict.to_dict()
+    try:
+        waf = _get_waf()
+        resp = waf.request(url, method=method, headers=headers, body=body)
+        result = resp.to_dict()
+        result["transport"] = f"waf:{resp.transport}"
+        result.setdefault("waf_challenge", verdict.to_dict())
+        return result
+    except WAFBlockError as e:
+        out["waf_block"] = e.to_dict()
+        return out
+    except Exception as e:  # noqa: BLE001 - never let WAF traversal break a probe
+        out["waf_error"] = str(e)
+        return out
+
+
+_WAF_SINGLETON = None
+
+
+def _get_waf():
+    """Lazy process-lifetime WAFIntegration (config from SYBER_WAF_CONFIG if set)."""
+    global _WAF_SINGLETON
+    if _WAF_SINGLETON is None:
+        from ..waf import build_waf_integration
+        _WAF_SINGLETON = build_waf_integration()
+    return _WAF_SINGLETON
 
 
 # --------------------------------------------------------------------------- #

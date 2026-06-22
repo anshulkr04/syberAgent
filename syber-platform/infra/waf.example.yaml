@@ -1,0 +1,44 @@
+# Syber WAF integration config (waf-spec §5).
+# Load with: SYBER_WAF_CONFIG=infra/waf.example.yaml  (or pass the path to
+# syber.waf.load_waf_config / build_waf_integration). All settings are optional;
+# the values below are the module defaults. A `targets` map overrides per domain.
+#
+# Secrets (proxy URLs, CAPTCHA api_key) should come from the environment, not this
+# file: proxies via SYBER_WAF_PROXIES="http://u:p@h1:p1,http://u:p@h2:p2".
+waf_integration:
+  default:
+    tls_impersonation: chrome120        # curl_cffi target (Chrome/FF/Safari profiles)
+    rate_limit_rps: 2.0                  # token-bucket cap, per domain
+    jitter_range_ms: [500, 3000]         # human-like inter-request delay
+    jitter_distribution: uniform         # uniform | gaussian
+    max_retries: 3
+    challenge_timeout_s: 60
+    cookie_store:
+      backend: memory                    # memory | sqlite | redis
+      sqlite_path: .waf_cookies.sqlite
+      redis_url: redis://localhost:6379/0
+      cleanup_interval_s: 300
+      default_ttl_s: 1800                # cf_clearance TTL assumption
+    proxy_pool:
+      type: residential                  # residential | datacenter | mobile
+      sticky_session_ttl: 1800           # keep one IP per domain while cookie valid
+      health_check_interval: 300
+      geo_target: null                   # ISO country code, e.g. US
+      max_failures_before_rotate: 3
+      endpoints_env: SYBER_WAF_PROXIES   # comma-separated proxy URLs read from env
+    challenge_solver:
+      engine: agent-browser              # agent-browser | flaresolverr | pydoll | none
+      headless: true
+      flaresolverr_url: http://localhost:8191
+      max_timeout_s: 60
+    captcha_service:
+      provider: null                     # 2captcha | capsolver | null
+      api_key: null                      # set via env in production, not here
+      poll_interval_s: 5.0
+      max_wait_s: 120.0
+  targets:
+    example.com:
+      rate_limit_rps: 0.5
+      jitter_range_ms: [2000, 8000]
+      proxy_pool:
+        geo_target: US

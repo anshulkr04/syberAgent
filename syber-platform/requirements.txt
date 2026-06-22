@@ -21,6 +21,9 @@ pyyaml>=6.0                  # Kafka topic creation from topics.yaml
 # Optional, spec-faithful upgrades with no Python 3.14 wheels yet. The platform
 # auto-detects these and falls back to dependency-light implementations.
 # ---------------------------------------------------------------------------
+# curl_cffi>=0.7             # WAF L1 browser-TLS impersonation (waf-spec §3.1) — no Py3.14 wheel
+#                            #   yet; falls back to a urllib transport + escalates to the L3 browser.
+# redis>=5.0                 # WAF cf_clearance cookie store, distributed backend (waf-spec §4.4)
 # torch>=2.2                 # real LSTM Autoencoder (spec §7.3) — else numpy-PCA fallback
 # transformers>=4.40         # DeBERTa-v3 injection classifier (spec §9.1) via SYBER_INJECTION_MODEL
 # sentence-transformers>=2.6 # real SBERT embeddings (spec §9.2/§10/§12) via SYBER_SBERT_MODEL

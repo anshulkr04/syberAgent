@@ -518,6 +518,102 @@ return True. Nothing left to rebuild for §13.
 
 ---
 
+## 14. Cloudflare WAF traversal layer — ADDED (2026-06-14)
+
+Implemented `waf-spec.md` (v1.0.0): a layered Cloudflare-WAF traversal module so the agent
+reaches WAF-protected targets instead of being blocked at the "Just a moment…" interstitial,
+and recognises/handles the challenge types. Same engineering posture as the rest of the
+platform — real where it can be, dependency-light fallbacks, never hard-crashes.
+
+**New package `syber/waf/`** (10 modules, all host-tested):
+- `detect.py` — PURE challenge detection (waf-spec §2): classifies js_challenge / turnstile_managed
+  / turnstile_interactive / managed_challenge / rate_limited / blocked from (status, headers, body);
+  extracts Turnstile sitekey, cf-ray, Retry-After, cf_clearance. Unit-tested without network.
+- `cookie_store.py` — cf_clearance store keyed by **(domain, IP, UA)** (§4.4 — CF binds the cookie
+  to the solving IP+UA). InMemory LRU+TTL (default), SQLite (persistent), Redis (import-guarded).
+- `rate_limiter.py` — token-bucket RPS per-domain/global + JitterEngine + exp backoff (cap 60s) +
+  429/Retry-After cool-down that progressively slows a 429-ing host (§4.6). **Fixed a real bug**:
+  the "first call" sentinel `last_refill==0.0` collided with a clock reading 0.0 → bucket refilled
+  full every call; now an explicit `initialized` flag.
+- `proxy_pool.py` — rotation + **sticky sessions** (one IP per domain while the cookie is valid),
+  health, geo targeting, fallback chains (§4.5). Empty pool == direct connection.
+- `config.py` — dataclasses + YAML/JSON loader with `default` + per-target override deep-merge (§5).
+- `tls_client.py` — **L1** browser-TLS impersonation via `curl_cffi` when present; **urllib fallback**
+  (no curl_cffi wheel on Py3.14, same story as torch/transformers). Browser fingerprint then comes
+  from the L3 solver instead.
+- `solver.py` — **L3** challenge solvers: `AgentBrowserSolver` (default — reuses the platform's own
+  agent-browser+Chromium; reads the **HttpOnly** cf_clearance via `cookies get`/CDP, which
+  `document.cookie` can't see), `FlareSolverrSolver` (REST), `PyDollSolver` (import-guarded seam).
+- `captcha.py` — **L4** 2captcha/CapSolver Turnstile token retrieval (§3.4); OFF by default, returns
+  actionable "not configured" rather than raising.
+- `integration.py` — `WAFIntegration` orchestrating the **8-step flow** (§4.3): L0 API-first →
+  L2 session reuse → L1 fetch → L3 solve+retry → L4 → `WAFBlockError`. `request`/`batch_request`/
+  `refresh_session`/`get_cookie`. **Synchronous** (matches the platform; the spec's async interface
+  is a trivial wrapper if ever needed).
+
+**Wiring:**
+- `scanning/webapp.py::http_request` now **auto-escalates** to the WAF module when an ordinary fetch
+  returns a Cloudflare challenge (opt-in via `SYBER_WAF`, default on; best-effort, falls back to the
+  raw challenge response on any WAF error). So the existing crawl/IDOR/injection layer is WAF-aware.
+- **3 new MCP tools** (now **32** total): `syber_waf_request`, `syber_waf_refresh`,
+  `syber_waf_session_status` — all default-deny **authorization-gated** (they actively reach the target).
+- `infra/waf.example.yaml` (§5 config) + `infra/cloudflare/` (§6 origin-hardening: `waf_rules.example.json`
+  custom-rule set + README for the three-tier auth / bot-management / allowlisting guidance).
+- `requirements.txt`: `curl_cffi` + `redis` added as commented optional upgrades (auto-detected).
+
+**Verified (host, 2026-06-14):** new `tests/waf/test_waf.py` = **29 tests** (detection signatures,
+cookie keying+TTL+LRU+SQLite, rate-limiter bucket/jitter/429-cooldown, proxy sticky/geo/fallback,
+config target-merge, and the full L0→L3 flow with a faked transport+solver). **Full suite 61 passed.**
+Real-network smoke: `waf.request('https://example.com/')` → 200 via L1 urllib, clean detection.
+`py_compile` clean on `mcp_server.py` + all of `syber/waf/` (FastMCP import is container-only).
+
+**Next (optional):** (a) sync the new tools + a "WAF traversal" section into the workspace/plugin
+`CLAUDE.md` doctrine, `/syber-pentest` command, and `syber-scanner` agent frontmatter (so the agent
+knows the tools exist) — same doctrine-sync done for §11/§13; (b) rebuild the Kali image to bake the
+`syber/waf/` package + infra files in; (c) install `curl_cffi` on a Py≤3.12 image for real JA3/JA4
+impersonation (L1 then clears more sites without invoking the browser); (d) wire the L4 token back into
+the agent-browser solver session for end-to-end interactive-Turnstile solving.
+
+### 14a. syber_engage wiring + real-site testing (2026-06-14)
+**Engagement integration done:** `scripts/syber_engage.sh` SEED + CONTINUE prompts now teach the agent
+the WAF behaviour (crawl/http_request auto-traverse Cloudflare; use `syber_waf_request` for crafted
+probes; a hard block 1020/1010 is unsolvable — note it, don't grind). `.env.example` documents the
+optional knobs: `SYBER_WAF` (default on), `SYBER_WAF_CONFIG`, `SYBER_WAF_PROXIES`,
+`SYBER_WAF_CAPTCHA_PROVIDER`/`_KEY` (wired into `build_waf_integration`). **In-container path:**
+`env_file: ../../.env` delivers all of these to the agent; `SYBER_WAF` defaults ON when unset, so
+auto-escalation is active with zero extra wiring. The MCP server inherits the container env, so the 3
+`syber_waf_*` tools + the auto-escalation both work once the image is rebuilt.
+
+**REBUILD REQUIRED:** the image does `COPY . /opt/syber-platform` + `pip install -e` at build time
+(no volume mount), and `mcp_server.py` now imports `syber.waf` at module top — so the Kali image MUST
+be rebuilt (`docker compose -f infra/docker-compose.kali.yml build kali`) before `syber_engage.sh`
+runs, or the MCP server won't import. Same rebuild step as §11/§13.
+
+**Bugs found + fixed while testing on a live Cloudflare site (`nowsecure.nl`):**
+1. **Headless Chrome DOES solve Cloudflare** — confirmed: `agent-browser cookies get` returned a real
+   `cf_clearance` token. The solver just read the page wrong.
+2. `agent-browser get html` returns a **truncated** 73-char string → the solver saw "no markers" and
+   declared a false clear. Fixed: read the live DOM via `eval document.documentElement.outerHTML`
+   (~183K chars) + guard `len(html) < 256` is never treated as "cleared".
+3. `agent-browser cookies get` emits **cookie-header format** (`cf_clearance=…`), not JSON — the parser
+   dropped it. Fixed: `parse_ab_cookies` now handles JSON *and* `k=v`/`;`-separated forms (skipping
+   cookie attributes).
+4. **cf_clearance is bound to the solving UA.** The browser solves as `HeadlessChrome/149` but L1 was
+   replaying with the config UA (`Chrome/120`) → Cloudflare rejected the cookie → infinite re-solve →
+   misleading "no response". Fixed: per-domain effective-UA (`_domain_ua`) so the cookie store + L1
+   replay both use the UA the browser actually solved with (same machine = same IP, so all three match).
+5. Terminal error is now informative (reports the real challenge/transport error, and **returns the
+   browser-rendered page** when cookie replay can't be honoured) instead of "no response".
+
+**Verified (host, 2026-06-14):** full suite **61 passed**; the L3 solver reads the real DOM + captures
+the UA end-to-end against a live site (`example.com` → 544 chars real HTML, UA captured, no false
+cookie); captcha env override works. The cf_clearance-issuing solve on `nowsecure.nl` was demonstrated
+earlier (real cookie captured); a clean re-run was blocked only by that domain's intermittent DNS in
+the dev sandbox (example.com/cloudflare.com/google.com resolve; nowsecure.nl flaps) — an environment
+quirk, not the code.
+
+---
+
 *Bottom line: the platform is built, the Kali image is rebuilt, and every layer is verified
 in-container — there is no outstanding build/setup step. §7 (severity/persistence/startup) done;
 §11 added the web-app pentest layer (IDOR/BOLA + injection + PTT); §12 added ephemeral teardown

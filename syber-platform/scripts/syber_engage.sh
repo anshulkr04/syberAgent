@@ -78,6 +78,13 @@ Work the full tree, waiting for each tool to finish (scans take minutes — do n
   7. syber_publish_finding for each CONFIRMED issue (attack_chain + per-step evidence_refs +
      exploitability + EVIDENCE-BASED severity), then syber_gate_finding.
 
+Cloudflare / WAF: if the target sits behind Cloudflare (a "Just a moment…" interstitial or a
+Turnstile widget), traversal is automatic — syber_crawl and syber_http_request escalate through the
+WAF layer (browser-TLS impersonation -> cached cf_clearance reuse -> real-browser challenge solve).
+For a crafted request against a Cloudflare-protected page call syber_waf_request, and
+syber_waf_session_status to see the cached session. A HARD block (e.g. Cloudflare error 1020/1010) is
+NOT solvable — record it and move on; do not hammer the target.
+
 Severity discipline: rate by demonstrated exploitability, not instinct. Confirm before reporting;
 one unverified signal is not a finding. Do not fabricate or inflate — "no critical issue found" is
 a valid, correct outcome if that is what the evidence shows.
@@ -90,8 +97,10 @@ EOF
 CONTINUE="Continue the AUTHORISED engagement against ${TARGET}. Re-check syber_pentest_plan and
 complete any task still outstanding (service enum, crawl, IDOR/BOLA, injection, browser inspection,
 graph review). If a scan timed out, re-run it with a longer SYBER_SCAN_TIMEOUT rather than skipping
-it. When every task is done, print ENGAGEMENT_COMPLETE: <summary> (and CRITICAL_CONFIRMED if a
-critical was gated). Do not repeat work already completed; do not pad with speculation."
+it. If the target is behind Cloudflare, crawl/http_request traverse the WAF automatically (or use
+syber_waf_request); a hard block (error 1020/1010) is not solvable — note it, don't grind. When every
+task is done, print ENGAGEMENT_COMPLETE: <summary> (and CRITICAL_CONFIRMED if a critical was gated).
+Do not repeat work already completed; do not pad with speculation."
 
 MSG="$SEED"
 pass=1

@@ -47,8 +47,10 @@ from syber.integrations import agentmail as _agentmail
 from syber.integrations import agentphone as _agentphone
 from syber.integrations import identity as _identity
 from syber.scanning import active_scan, webapp
-from syber.scanning.active_scan import NotAuthorized
+from syber.scanning.active_scan import NotAuthorized, _require_authorized
 from syber.scanning.authorization import get_auth_store
+from syber.waf import build_waf_integration
+from syber.waf.integration import WAFBlockError
 from syber.scoring.gate import gate_candidate
 from syber.seed_data import ACTOR, build_scenario
 from syber.tools.behaviour import score_behaviour as _score_behaviour
@@ -351,6 +353,77 @@ def syber_phone_status() -> dict[str, Any]:
                 "message": "AgentPhone not set up. Run scripts/syber_phone_signup.sh "
                            "(one-time) and add the creds to .env."}
     return _integration(_agentphone.status)
+
+
+# --------------------------------------------------------------------------- #
+# Cloudflare WAF traversal (AUTHORISED targets only — waf-spec §4)
+# --------------------------------------------------------------------------- #
+_WAF: dict[str, Any] = {"integration": None}
+
+
+def _waf() -> Any:
+    if _WAF["integration"] is None:
+        _WAF["integration"] = build_waf_integration()
+    return _WAF["integration"]
+
+
+@mcp.tool()
+def syber_waf_request(url: str, method: str = "GET", headers: dict[str, str] | None = None,
+                      body: str = "") -> dict[str, Any]:
+    """Fetch an AUTHORISED Cloudflare-protected URL, traversing the WAF automatically
+    (waf-spec §4): L1 browser-TLS impersonation -> L2 cf_clearance session reuse ->
+    L3 challenge solver (real browser) -> L4 CAPTCHA service. Returns the final
+    {status, headers, body, layer, transport, cookie_used}. Use this when an
+    ordinary fetch of the target hits a 'Just a moment…' interstitial or Turnstile.
+    On a hard block it returns {error:'waf_block', ...} with the challenge details."""
+    from urllib.parse import urlparse
+    host = urlparse(url).netloc.split("@")[-1].split(":")[0]
+    try:
+        _require_authorized(host)
+    except NotAuthorized as e:
+        return {"error": "not_authorized", "message": str(e),
+                "remedy": "Call syber_authorize_target first."}
+    try:
+        resp = _waf().request(url, method=method, headers=headers or None, body=body or None)
+        return resp.to_dict()
+    except WAFBlockError as e:
+        return e.to_dict()
+
+
+@mcp.tool()
+def syber_waf_refresh(domain: str) -> dict[str, Any]:
+    """Proactively solve the Cloudflare challenge for an AUTHORISED domain and cache
+    the cf_clearance cookie before it expires (waf-spec §3.6), so later requests
+    skip the challenge. Returns {refreshed, cookie_present}."""
+    try:
+        _require_authorized(domain)
+    except NotAuthorized as e:
+        return {"error": "not_authorized", "message": str(e),
+                "remedy": "Call syber_authorize_target first."}
+    try:
+        ok = _waf().refresh_session(domain)
+        return {"refreshed": bool(ok), "cookie_present": _waf().get_cookie(domain) is not None}
+    except WAFBlockError as e:
+        return e.to_dict()
+
+
+@mcp.tool()
+def syber_waf_session_status(domain: str) -> dict[str, Any]:
+    """Report the cached WAF session for a domain: whether a valid cf_clearance
+    cookie is held, the configured TLS-impersonation target, solver engine, and
+    whether curl_cffi / proxies / a CAPTCHA service are active (waf-spec §4)."""
+    from syber.waf.tls_client import curl_cffi_available
+    waf = _waf()
+    return {
+        "domain": domain,
+        "cf_clearance_cached": waf.get_cookie(domain) is not None,
+        "tls_impersonation": waf.config.tls_impersonation,
+        "tls_transport": "curl_cffi" if curl_cffi_available() else "urllib (fallback)",
+        "solver_engine": getattr(waf.solver, "name", None),
+        "solver_available": bool(waf.solver and waf.solver.available()),
+        "proxies_configured": waf.proxies.configured,
+        "captcha_configured": waf.captcha.configured,
+    }
 
 
 @mcp.tool()

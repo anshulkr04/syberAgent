@@ -1,0 +1,40 @@
+{
+  "_comment": "Cloudflare WAF custom-rule set for hardening your OWN agent endpoints (waf-spec §6.1). Import via the Cloudflare API (Rulesets: phase http_request_firewall_custom) or transcribe into Security > WAF > Custom Rules. Rules are evaluated top-down; the first match wins. Replace <…> placeholders before applying.",
+  "name": "syber-agent-endpoint-hardening",
+  "kind": "zone",
+  "phase": "http_request_firewall_custom",
+  "rules": [
+    {
+      "priority": 1,
+      "description": "Allow authenticated Syber agents",
+      "expression": "(http.request.uri.path in {\"/api/v1/call\" \"/api/v1/tts\" \"/api/v1/transcribe\" \"/api/v1/agent\"} and any(http.request.headers[\"x-agent-token\"][*] in {\"<YOUR_AGENT_TOKEN>\"}))",
+      "action": "skip",
+      "action_parameters": { "ruleset": "current" }
+    },
+    {
+      "priority": 2,
+      "description": "Block known-abuse ASNs",
+      "expression": "(ip.src.asn in {<ABUSE_ASN_1> <ABUSE_ASN_2>})",
+      "action": "block"
+    },
+    {
+      "priority": 3,
+      "description": "Rate-limit the agent API surface",
+      "expression": "(starts_with(http.request.uri.path, \"/api/\"))",
+      "action": "managed_challenge",
+      "_note": "For a true rate limit use a Rate Limiting rule (ruleset phase http_ratelimit) with characteristics ip.src + http.request.uri.path, period 60, requests_per_period 100, mitigation_timeout 600."
+    },
+    {
+      "priority": 4,
+      "description": "Block AI scrapers hitting the API",
+      "expression": "(cf.verified_bot_category eq \"AI Crawler\" and starts_with(http.request.uri.path, \"/api/\"))",
+      "action": "block"
+    },
+    {
+      "priority": 5,
+      "description": "Challenge low-score bots everywhere",
+      "expression": "(cf.bot_management.score lt 30)",
+      "action": "managed_challenge"
+    }
+  ]
+}
