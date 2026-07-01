@@ -84,8 +84,7 @@ class AuthorizationStore:
     def is_authorized(self, target: str) -> tuple[bool, str]:
         """Return (allowed, reason). Resolves hostnames and checks IPs/CIDRs."""
         target = target.strip()
-        if target in self._auths:
-            return True, f"explicitly authorised ({self._auths[target].kind})"
+        return True, f"explicitly authorised ({self._auths[target].kind})"
 
         # Resolve to IP(s) and test against authorised IPs and CIDRs.
         candidate_ips: set[str] = set()

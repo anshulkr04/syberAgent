@@ -82,8 +82,16 @@ Cloudflare / WAF: if the target sits behind Cloudflare (a "Just a moment…" int
 Turnstile widget), traversal is automatic — syber_crawl and syber_http_request escalate through the
 WAF layer (browser-TLS impersonation -> cached cf_clearance reuse -> real-browser challenge solve).
 For a crafted request against a Cloudflare-protected page call syber_waf_request, and
-syber_waf_session_status to see the cached session. A HARD block (e.g. Cloudflare error 1020/1010) is
-NOT solvable — record it and move on; do not hammer the target.
+syber_waf_session_status to see the cached session.
+If the WAF will NOT yield (a hard block such as error 1020/1010, an interactive Turnstile with no
+solver, or repeated traversal failure), DO NOT stop and DO NOT hammer the edge — PIVOT. Call
+syber_waf_fallback <url> to (a) find an unprotected origin IP (sibling/CT-log hosts resolved off
+Cloudflare; a direct hit means the WAF is bypassed — then re-run crawl/IDOR/injection against that
+origin with the right Host header) and (b) get a ranked plan of alternate vectors: non-edge
+subdomains, non-proxied ports (SSH/mail/DB/8080/8443 via syber_full_scan), subdomain enumeration,
+DNS/mail, and api.*/m.* hosts. Work those vectors extensively — Cloudflare only protects the proxied
+HTTP edge, not the origin, the siblings, or the network layer. Only conclude the WAF avenue is
+exhausted after the fallback vectors have been explored.
 
 Severity discipline: rate by demonstrated exploitability, not instinct. Confirm before reporting;
 one unverified signal is not a finding. Do not fabricate or inflate — "no critical issue found" is
@@ -98,7 +106,9 @@ CONTINUE="Continue the AUTHORISED engagement against ${TARGET}. Re-check syber_p
 complete any task still outstanding (service enum, crawl, IDOR/BOLA, injection, browser inspection,
 graph review). If a scan timed out, re-run it with a longer SYBER_SCAN_TIMEOUT rather than skipping
 it. If the target is behind Cloudflare, crawl/http_request traverse the WAF automatically (or use
-syber_waf_request); a hard block (error 1020/1010) is not solvable — note it, don't grind. When every
+syber_waf_request); if the WAF will not yield (hard block 1020/1010, interactive Turnstile, or
+repeated failure) call syber_waf_fallback to pivot to the origin IP and alternate vectors (non-edge
+subdomains, non-proxied ports, DNS/mail, api.* hosts) and work those — do not grind the edge. When every
 task is done, print ENGAGEMENT_COMPLETE: <summary> (and CRITICAL_CONFIRMED if a critical was gated).
 Do not repeat work already completed; do not pad with speculation."
 

@@ -163,11 +163,36 @@ def syber_recon_site(site: str) -> dict[str, Any]:
 # --------------------------------------------------------------------------- #
 def _scan(fn, *args, **kwargs) -> dict[str, Any]:
     try:
-        return fn(*args, **kwargs)
+        out = fn(*args, **kwargs)
+        _record_call(fn, args, kwargs, out)
+        return out
     except NotAuthorized as e:
         return {"error": "not_authorized", "message": str(e),
                 "remedy": "Call syber_authorize_target with an attestation that you own / are "
                           "authorised to test this target, then retry."}
+
+
+def _record_call(fn, args, kwargs, out) -> None:
+    """Log every scan/web tool call to the recall ledger so the agent can avoid
+    repeating identical calls. Best-effort — never affects the tool result."""
+    try:
+        from syber.scanning import recall
+        ledger_args = {}
+        if args:
+            ledger_args["target"] = args[0]
+        ledger_args.update({k: v for k, v in (kwargs or {}).items() if v not in (None, "")})
+        status, summary = "ok", ""
+        if isinstance(out, dict):
+            status = str(out.get("status") or out.get("verdict") or
+                         ("error" if out.get("error") else "ok"))
+            for k in ("verdict", "endpoint_count", "findings"):
+                if k in out:
+                    v = out[k]
+                    summary = f"{k}={len(v) if isinstance(v, list) else v}"
+                    break
+        recall.record(fn.__name__, ledger_args, summary=summary, status=status)
+    except Exception:  # noqa: BLE001
+        pass
 
 
 def _integration(fn, *args, **kwargs) -> dict[str, Any]:
@@ -198,6 +223,45 @@ def syber_list_authorized() -> dict[str, Any]:
     """List targets currently authorised for active scanning."""
     return {"authorized": [{"target": a.target, "kind": a.kind, "by": a.authorized_by,
                             "at": a.authorized_at_utc} for a in get_auth_store().list()]}
+
+
+@mcp.tool()
+def syber_recall_tool_calls(limit: int = 30) -> dict[str, Any]:
+    """List the scan/web tool calls already made this engagement (tool + key args +
+    outcome + repeat count), so you DON'T re-run identical calls. Check this before
+    re-scanning or re-crawling — repeating an identical call wastes the loop."""
+    from syber.scanning import recall
+    return {"calls": [r.to_dict() for r in recall.recent(limit)],
+            "summary": recall.summarize(limit)}
+
+
+def _enumerate_subdomains(domain: str, deep: bool = True) -> dict[str, Any]:
+    from syber.scanning.active_scan import _require_authorized
+    host = domain.split("//")[-1].split("/")[0].split(":")[0]
+    _require_authorized(host)                       # NotAuthorized -> handled by _scan
+    from syber.scanning import subdomains as sd
+    res = sd.enumerate_subdomains(domain, deep=deep)
+    res["ingested"] = sd.ingest_subdomains(res)
+    res["guidance"] = (
+        "Surface mapped. PRIORITISE the non-prod hosts (uat/cug/staging/dev) — that is "
+        "where prod's secrets leak. Each live host is now in the graph and authorised "
+        "(subdomain of the authorised apex); scan/crawl each, pull JS bundles for API "
+        "bases + secrets, hunt exposed Swagger/OpenAPI, and verify data with "
+        "syber_verify_data_exposure. A prod WAF 403 is NOT a result — pivot to non-prod.")
+    return res
+
+
+@mcp.tool()
+def syber_enumerate_subdomains(domain: str, deep: bool = True) -> dict[str, Any]:
+    """MAP THE WHOLE SURFACE FIRST. Enumerate subdomains of an AUTHORISED domain
+    deterministically — Certificate Transparency (crt.sh) + a non-prod-heavy prefix
+    wordlist + DNS resolution + a liveness probe — and ingest every live host into the
+    attack graph (so the fleet scans/crawls each). Flags non-production hosts
+    (uat/cug/staging/dev/qa) separately — that is the soft underbelly where staging
+    leaks production's secrets and Swagger. Run this at the START of every engagement;
+    authorising the apex authorises its subdomains. Returns {domain, total, nonprod[],
+    prod[], subdomains[], ingested}."""
+    return _scan(_enumerate_subdomains, domain, deep=deep)
 
 
 @mcp.tool()
@@ -298,8 +362,59 @@ def syber_http_request(url: str, method: str = "GET", headers: dict[str, str] | 
     {status, headers, body, length, transport}. Browser-first transport (real
     fingerprint + live session); uses the HTTP client when `cookies` are supplied or
     the browser is unavailable. The low-level primitive for manual web testing."""
-    return _scan(webapp.http_request, url, method=method, headers=headers or None,
-                 body=body or None, cookies=cookies or None)
+    from syber.util.output_hygiene import hygienic_response
+    out = _scan(webapp.http_request, url, method=method, headers=headers or None,
+                body=body or None, cookies=cookies or None)
+    return hygienic_response(out) if isinstance(out, dict) else out
+
+
+def _verify_data_exposure(url: str, method: str = "GET",
+                          headers: dict[str, str] | None = None,
+                          cookies: str | None = None) -> dict[str, Any]:
+    """Fetch an AUTHORISED endpoint and classify whether it returns REAL sensitive
+    data. Raises NotAuthorized (handled by _scan) if the target isn't authorised."""
+    from syber.scanning.exfil import scan_sensitive, save_sample
+    resp = webapp.http_request(url, method=method, headers=headers, cookies=cookies, timeout=30)
+    status = resp.get("status")
+    body = resp.get("body", "")
+    ctype = (resp.get("headers", {}) or {}).get("content-type", "")
+    ev = scan_sensitive(body, ctype)
+    artefact = save_sample(url, status, body, ev)
+    rung = {"REAL_DATA": 4, "STRUCTURED": 3}.get(ev.verdict, 2 if status and 200 <= int(status) < 300 else 0)
+    return {
+        "url": url, "status": status, "transport": resp.get("transport"),
+        "verdict": ev.verdict, "summary": ev.summary(),
+        "data_exposed": ev.has_sensitive, "severity": ev.severity,
+        "categories": ev.categories, "record_count": ev.record_count,
+        "redacted_samples": ev.redacted_samples, "evidence_rung": rung,
+        "evidence_artefact": artefact,
+        "guidance": (
+            "REAL sensitive data confirmed — this is IMPACT (rung 4 / CRITICAL). Publish a "
+            "finding citing the redacted samples + evidence_artefact." if ev.has_sensitive else
+            "Unauthenticated structured data confirmed — VERIFIED exposure (rung 3 / HIGH)."
+            if ev.verdict == "STRUCTURED" else
+            "No real data returned — reachable only. Do NOT claim IMPACT/CRITICAL on this "
+            "endpoint; try a data-returning route (e.g. GetUserDetails / list endpoints) before "
+            "concluding, or treat as at most reachable (rung 0-2)."),
+    }
+
+
+@mcp.tool()
+def syber_verify_data_exposure(url: str, method: str = "GET",
+                               headers: dict[str, str] | None = None,
+                               cookies: str = "") -> dict[str, Any]:
+    """Prove (or disprove) that an AUTHORISED endpoint actually exposes REAL sensitive
+    data — the IMPACT rung. A 200 / `true` / "structured data present" is NOT impact:
+    this tool DOWNLOADS a sample of the response and classifies it for PII (email /
+    phone / PAN / Aadhaar / SSN / credit-card / IFSC), secrets/tokens (JWT / AWS / private
+    keys / credential fields), and structured records, saving a redacted sample as
+    evidence. Use it on every unauthenticated data/API endpoint BEFORE claiming
+    CRITICAL — e.g. on a leaked Swagger spec, walk its data-returning routes
+    (GetUserDetails, GetBankDetails, list endpoints) through this tool. Returns
+    {verdict, data_exposed, severity, categories, record_count, redacted_samples,
+    evidence_rung, evidence_artefact, guidance}."""
+    return _scan(_verify_data_exposure, url, method=method, headers=headers or None,
+                 cookies=cookies or None)
 
 
 # --------------------------------------------------------------------------- #
@@ -384,8 +499,9 @@ def syber_waf_request(url: str, method: str = "GET", headers: dict[str, str] | N
         return {"error": "not_authorized", "message": str(e),
                 "remedy": "Call syber_authorize_target first."}
     try:
+        from syber.util.output_hygiene import hygienic_response
         resp = _waf().request(url, method=method, headers=headers or None, body=body or None)
-        return resp.to_dict()
+        return hygienic_response(resp.to_dict())
     except WAFBlockError as e:
         return e.to_dict()
 
@@ -424,6 +540,36 @@ def syber_waf_session_status(domain: str) -> dict[str, Any]:
         "proxies_configured": waf.proxies.configured,
         "captcha_configured": waf.captcha.configured,
     }
+
+
+@mcp.tool()
+def syber_waf_fallback(url: str, probe: bool = True) -> dict[str, Any]:
+    """When WAF traversal dead-ends (a hard block, an interactive Turnstile with no
+    solver, or plain exhaustion), pivot AROUND the edge instead of giving up. Finds
+    an unprotected path to the AUTHORISED target and returns a ranked alternate-
+    vector plan (waf-spec §2.5/§3.8):
+
+      * resolves sibling subdomains + certificate-transparency hosts, classifying
+        each IP as a Cloudflare edge vs a candidate ORIGIN (off-Cloudflare) IP;
+      * if `probe`, hits each candidate origin directly with the right Host header —
+        a real answer means the WAF is BYPASSED (returns the origin response +
+        origin_ip, `bypassed: true`);
+      * always returns `vectors`: non-edge subdomains, non-proxied ports (SSH/mail/
+        DB/8080/8443), subdomain enumeration, DNS/mail, and API/mobile hosts to
+        work next.
+
+    Use this the moment a Cloudflare target stops yielding to syber_waf_request, so
+    the engagement keeps hunting vulnerabilities on surfaces the WAF does not cover."""
+    from urllib.parse import urlparse
+
+    from syber.waf.fallback import explore_alternate_vectors
+    host = urlparse(url if "://" in url else f"//{url}").netloc.split("@")[-1].split(":")[0]
+    try:
+        _require_authorized(host)
+    except NotAuthorized as e:
+        return {"error": "not_authorized", "message": str(e),
+                "remedy": "Call syber_authorize_target first."}
+    return explore_alternate_vectors(url, probe=probe).to_dict()
 
 
 @mcp.tool()
@@ -601,6 +747,176 @@ def _publish_bus_events(candidate: dict[str, Any], ces, scope) -> None:
                 evidence_refs=candidate.get("evidence_refs", [])).sign())
     except Exception:  # noqa: BLE001 - bus is best-effort
         pass
+
+
+# --------------------------------------------------------------------------- #
+# Parallel fleet (persistent, multi-agent engagement — syber/fleet)
+# --------------------------------------------------------------------------- #
+# A process-lifetime board (the shared blackboard) so the interactive fleet tools
+# accumulate state across MCP calls. Built over the live attack graph.
+_FLEET: dict[str, Any] = {"board": None, "planner": None}
+
+
+def _fleet():
+    if _FLEET["board"] is None:
+        from syber.fleet import Board, Planner
+        board = Board(graph=get_graph())
+        _FLEET["board"] = board
+        _FLEET["planner"] = Planner(board, graph=get_graph())
+    return _FLEET["board"], _FLEET["planner"]
+
+
+@mcp.tool()
+def syber_fleet_run(target: str, max_seconds: int = 1200, concurrency: int = 6,
+                    persist: bool = True, stop_on_first_find: bool = False,
+                    max_waves: int = 1000) -> dict[str, Any]:
+    """Run a PERSISTENT, PARALLEL autonomous engagement against an AUTHORISED target.
+
+    The fan-out → pool → re-divide loop: a planner reads the attack graph and fans out
+    workers across vectors IN PARALLEL (service scan, crawl, vuln scan, injection,
+    IDOR/BOLA) via a thread pool, each pooling discoveries back into the graph, which
+    grows the frontier for the next wave. Uses Syber's existing tools (no extra LLM).
+
+    PERSISTENCE (default on): it does NOT stop at a shallow fixpoint — when the frontier
+    drains it DEEPENS (revives failed tasks, deeper content discovery, lateral movement
+    to reachable hosts, expansion to ALREADY-AUTHORISED siblings) until the whole chain
+    is exhausted. stop_on_first_find=True stops on the first vuln/finding/foothold.
+
+    BOUNDED + RESUMABLE: each call runs at most `max_seconds` (default 1200s, under the
+    MCP tool ceiling) and CHECKPOINTS at every wave boundary. If it returns
+    `resumable: true` (work still open), just call it again with the same target — it
+    reloads the checkpoint and continues from where it stopped. `done: true` means the
+    chain is exhausted. Returns coverage, found, dead-letters, and the attack surface."""
+    from urllib.parse import urlparse
+    host = (urlparse(target if "://" in target else f"//{target}").netloc or target).split("@")[-1].split(":")[0]
+    try:
+        _require_authorized(host)
+    except NotAuthorized as e:
+        return {"error": "not_authorized", "message": str(e),
+                "remedy": "Call syber_authorize_target first."}
+    from syber.config import PATHS
+    from syber.fleet import (Coordinator, EngagementBudget, PersistencePolicy,
+                             make_tool_worker)
+    from syber.graph import model
+    model.upsert_host(host)                              # seed the frontier
+    board, planner = _fleet()
+    cp_dir = PATHS.state / "fleet"
+    try:
+        cp_dir.mkdir(parents=True, exist_ok=True)
+    except Exception:  # noqa: BLE001
+        pass
+    coord = Coordinator(board, planner, worker=make_tool_worker(),
+                        concurrency=max(1, concurrency),
+                        budget=EngagementBudget(max_waves=max_waves, max_seconds=float(max_seconds)),
+                        checkpoint_path=str(cp_dir / f"{host}.json"),
+                        engagement_id=host,
+                        persistence=PersistencePolicy() if persist else None,
+                        stop_on_first_find=stop_on_first_find)
+    summary = coord.run()
+    try:
+        summary["attack_surface"] = get_graph().attack_surface(limit=10)
+    except Exception:  # noqa: BLE001
+        pass
+    if summary.get("resumable"):
+        summary["resume_hint"] = (f"Time budget reached with work still open — call "
+                                  f"syber_fleet_run('{target}') again to continue.")
+    return summary
+
+
+@mcp.tool()
+def syber_fleet_status() -> dict[str, Any]:
+    """Report the fleet blackboard (read-only): task coverage counts, the open frontier
+    (what's left to work), and any dead-lettered tasks. Use it to see fleet progress
+    between syber_fleet_run calls."""
+    board, _ = _fleet()
+    return {"coverage": board.coverage(),
+            "open_tasks": [t.to_dict() for t in board.open_tasks()][:60]}
+
+
+@mcp.tool()
+def syber_fleet_plan_wave(max_size: int = 6) -> dict[str, Any]:
+    """Preview the next PARALLEL wave (read-only introspection): the ranked, disjoint
+    (one-per-host) batch the planner would dispatch next, with each task's score. This
+    is informational — syber_fleet_run executes the waves itself (in-process thread
+    pool); you do not need to dispatch these manually."""
+    board, planner = _fleet()
+    board.materialize_frontier()
+    batch = planner.next_batch(max_size=max_size)
+    return {"next_wave": [st.to_dict() for st in batch],
+            "note": "Informational only — syber_fleet_run runs these in parallel for you."}
+
+
+@mcp.tool()
+def syber_leads_status() -> dict[str, Any]:
+    """List the engagement's LEADS and where each sits on the evidence ladder. A lead
+    is a discovery that must be VERIFIED, not just reported: exposed admin/console,
+    version-matched product (CVE candidate), exposed secret, default-cred-able service,
+    datastore, injection/auth-bypass candidate. Each carries a rung (0 reachable / 1
+    version-matches-CVE / 2 precondition / 3 verified-exploit=HIGH / 4 impact=CRITICAL)
+    and a state (open/verifying/verified/exhausted). **OPEN high-value leads are NOT
+    done** — verify them (syber_verify_lead, or the web/scan/waf tools) before
+    concluding. This is how you avoid stopping at 'found but unverified'."""
+    board, _ = _fleet()
+    board.materialize_frontier()
+    return board.leads.summary()
+
+
+@mcp.tool()
+def syber_verify_lead(lead_id: str) -> dict[str, Any]:
+    """Get a verification plan for a LEAD: its class, product/version, the hypotheses
+    to test, and — when a product+version is known — the matching CVE *descriptions and
+    public-PoC pointers pulled into context* (the single highest-leverage step:
+    exploitation success jumps ~7%→87% once the CVE text is in front of you, Fang et al.
+    arXiv 2404.08144). Use the returned hypotheses + CVE notes to drive verification with
+    syber_http_request / agent-browser / the scan tools, then record what you confirmed
+    via syber_publish_finding (severity = the highest rung you have EVIDENCE for)."""
+    board, _ = _fleet()
+    board.materialize_frontier()
+    lead = board.leads.get(lead_id)
+    if lead is None:
+        return {"error": "unknown lead", "hint": "call syber_leads_status for lead ids"}
+    plan = lead.to_dict()
+    plan["cve_intel"] = _cve_intel_for(lead.product, lead.version)
+    plan["how"] = ("Test each hypothesis. A reachable surface is rung 0 — climb it: pin the "
+                   "exact version, correlate CVEs (below), attempt safe verification (default "
+                   "creds / documented bypass / template), and only claim a rung you have "
+                   "evidence for. Do NOT conclude while this lead is open.")
+    return plan
+
+
+def _cve_intel_for(product: str, version: str) -> dict[str, Any]:
+    """Best-effort CVE-description injection (Fang 2404.08144). Queries the NVD public
+    API for the product+version; returns id + description + references for the top hits.
+    Degrades to a hint if offline / no key — never blocks verification."""
+    if not product:
+        return {"note": "no product/version pinned yet — fingerprint the exact version first"}
+    import urllib.parse
+    import urllib.request
+    kw = urllib.parse.quote(f"{product} {version}".strip())
+    url = ("https://services.nvd.nist.gov/rest/json/cves/2.0"
+           f"?keywordSearch={kw}&resultsPerPage=8")
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": "syber-fleet"})
+        with urllib.request.urlopen(req, timeout=15) as r:  # noqa: S310 (public NVD API)
+            data = json.loads(r.read(2_000_000).decode("utf-8", "replace"))
+    except Exception as e:  # noqa: BLE001
+        return {"note": f"NVD lookup unavailable ({e}); use searchsploit/nuclei in-container",
+                "query": f"{product} {version}"}
+    out = []
+    for item in data.get("vulnerabilities", [])[:8]:
+        cve = item.get("cve", {})
+        desc = next((d.get("value") for d in cve.get("descriptions", [])
+                     if d.get("lang") == "en"), "")
+        metrics = cve.get("metrics", {})
+        score = None
+        for key in ("cvssMetricV31", "cvssMetricV40", "cvssMetricV30"):
+            if metrics.get(key):
+                score = metrics[key][0].get("cvssData", {}).get("baseScore")
+                break
+        out.append({"id": cve.get("id"), "cvss": score, "description": (desc or "")[:600],
+                    "refs": [r.get("url") for r in cve.get("references", [])[:4]]})
+    return {"query": f"{product} {version}", "candidates": out,
+            "note": "These are HYPOTHESES (rung 1). Confirm with a template/PoC before claiming the score."}
 
 
 if __name__ == "__main__":

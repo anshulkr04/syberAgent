@@ -41,6 +41,7 @@ _W_VULN = 0.3
 _W_PRESENTS = 1.0
 _W_COVERS = 1.0
 _W_PART_OF = 0.2
+_W_REACH = 0.4          # network reachability hop (MulVAL hacl) — a cheap precondition edge
 
 
 def _host_root_domain(hostname: str) -> str | None:
@@ -120,6 +121,74 @@ def upsert_certificate(host: str, fingerprint: str, subject_cn: str | None = Non
         g.add_node(dom, "Domain", name=dom)
         g.add_edge(cid, dom, "COVERS", edge_weight=_W_COVERS)
     return cid
+
+
+# --------------------------------------------------------------------------- #
+# Reachability + host access-state (attack-graph layer, MulVAL hacl/netAccess)
+# --------------------------------------------------------------------------- #
+# Syber's surface graph (Host-Service-Vuln) becomes a true *attack* graph when it
+# also models (a) which hosts can reach which (the precondition for any remote
+# exploit) and (b) each host's foothold state. Compromising a host then DERIVES
+# reachability to its neighbours — the recursion that is a multi-step attack path
+# (MulVAL: execCode(H1) ∧ hacl(H1,H2) ⇒ netAccess(H2)).
+_ACCESS_LEVELS = {"none", "user", "root"}
+
+
+def set_host_state(host: str, *, discovered: bool | None = None,
+                   reachable: bool | None = None, compromised: bool | None = None,
+                   access: str | None = None, value: float | None = None) -> str:
+    """Set a host's attack-state properties (idempotent merge). ``access`` is one of
+    none|user|root; ``value`` marks crown-jewel criticality for path ranking."""
+    g = get_graph()
+    g.add_node(host, "Host", hostname=host)
+    props: dict[str, Any] = {}
+    if discovered is not None:
+        props["discovered"] = discovered
+    if reachable is not None:
+        props["reachable"] = reachable
+    if compromised is not None:
+        props["compromised"] = compromised
+    if access is not None and access in _ACCESS_LEVELS:
+        props["access"] = access
+    if value is not None:
+        props["value"] = value
+    if props:
+        g.add_node(host, "Host", **props)
+    return host
+
+
+def upsert_reachability(src_host: str, dst_host: str, protocol: str = "tcp",
+                        port: int | None = None) -> str:
+    """Record that ``src_host`` can reach ``dst_host`` (MulVAL hacl). The destination
+    is therefore network-reachable (netAccess) — mark it discovered+reachable."""
+    g = get_graph()
+    g.add_node(src_host, "Host", hostname=src_host)
+    g.add_node(dst_host, "Host", hostname=dst_host)
+    g.add_edge(src_host, dst_host, "CAN_REACH", edge_weight=_W_REACH,
+               protocol=protocol, port=port)
+    g.add_node(dst_host, "Host", discovered=True, reachable=True)
+    return dst_host
+
+
+def mark_compromised(host: str, access: str = "user") -> list[str]:
+    """Record a foothold on ``host`` (execCode) and DERIVE reachability to every host
+    it CAN_REACH (netAccess). Returns the hosts newly made reachable — the
+    lateral-movement frontier the fleet will pick up. This is the incremental,
+    monotone graph update that turns a single foothold into an attack path."""
+    g = get_graph()
+    g.add_node(host, "Host", hostname=host, compromised=True, discovered=True,
+               access=access if access in _ACCESS_LEVELS else "user")
+    derived: list[str] = []
+    try:
+        for _, dst, ed in g.g.out_edges(host, data=True):
+            if ed.get("edge_type") == "CAN_REACH":
+                dnode = g.g.nodes.get(dst, {})
+                if not dnode.get("compromised"):
+                    g.add_node(dst, "Host", discovered=True, reachable=True)
+                    derived.append(dst)
+    except Exception:  # noqa: BLE001 - derivation is best-effort
+        pass
+    return derived
 
 
 def upsert_finding(finding: dict[str, Any], host: str | None = None) -> str:

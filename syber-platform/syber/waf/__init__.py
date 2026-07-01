@@ -25,6 +25,8 @@ from .config import (CaptchaServiceConfig, CookieStoreConfig, ProxyPoolConfig,
                      SolverConfig, WAFIntegrationConfig, load_waf_config)
 from .cookie_store import CookieRecord, CookieStore, make_cookie_store
 from .detect import ChallengeInfo, detect_challenge, is_cloudflare
+from .fallback import (FallbackResult, OriginCandidate, explore_alternate_vectors,
+                       find_origin_candidates, is_cloudflare_ip, probe_origin)
 from .integration import (WAFBlockError, WAFIntegration, WAFResponse,
                           build_waf_integration)
 
@@ -34,4 +36,6 @@ __all__ = [
     "CaptchaServiceConfig", "load_waf_config",
     "ChallengeInfo", "detect_challenge", "is_cloudflare",
     "CookieRecord", "CookieStore", "make_cookie_store",
+    "FallbackResult", "OriginCandidate", "explore_alternate_vectors",
+    "find_origin_candidates", "probe_origin", "is_cloudflare_ip",
 ]

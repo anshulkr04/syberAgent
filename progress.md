@@ -612,6 +612,383 @@ earlier (real cookie captured); a clean re-run was blocked only by that domain's
 the dev sandbox (example.com/cloudflare.com/google.com resolve; nowsecure.nl flaps) — an environment
 quirk, not the code.
 
+### 14b. WAF dead-end FALLBACK — pivot to alternate vectors (2026-06-26)
+When the layered traversal cannot clear Cloudflare (a hard block 1020/1010, an interactive Turnstile
+with no solver, or plain exhaustion), the engagement no longer dead-ends — it **pivots around the edge**.
+Cloudflare only protects the proxied HTTP edge; the origin server, sibling subdomains, and the network
+layer routinely sit outside it.
+
+**New module `syber/waf/fallback.py`** (stdlib only — `socket`/`ssl`/`ipaddress`/`urllib`):
+- `is_cloudflare_ip()` — classifies an IP against Cloudflare's published v4/v6 edge ranges (an IP
+  *outside* them resolved for a sibling/CT host is a candidate origin).
+- `find_origin_candidates()` — resolves common origin-revealing subdomains (`direct`/`origin`/`mail`/
+  `dev`/`staging`/`api`/`cpanel`…) **plus** certificate-transparency hosts (crt.sh OSINT — against the
+  public CT record, not the target), and splits each resolved IP into CF-edge vs candidate-origin.
+- `probe_origin()` — connects to a candidate IP directly with the correct `Host` header (SNI pinned,
+  cert-verify off, like an origin pull). A real, non-challenge answer means **the WAF is bypassed**.
+- `explore_alternate_vectors()` — the top-level pivot: returns a `FallbackResult` with the direct-origin
+  hit (if any) **and** a ranked vector plan (direct-origin → non-edge subdomains → non-proxied ports
+  SSH/mail/DB/8080/8443 → subdomain enumeration → DNS/mail → api.*/m.* hosts).
+
+**Wiring:**
+- `scanning/webapp.py` `_waf_escalate` now calls `_waf_fallback()` on a `WAFBlockError` *or any* WAF
+  error. If a direct origin answers, it returns **that** un-WAF'd response (so crawl/IDOR/injection run
+  on real content) with `waf_bypassed: true` + `origin_ip`; otherwise it attaches `waf_fallback` (the
+  vector plan) to the original challenge response. Best-effort — never raises into the probe.
+- New MCP tool **`syber_waf_fallback(url, probe=True)`** (authorization-gated) — now **33** WAF-aware
+  tools. The agent calls it the moment a Cloudflare target stops yielding.
+- `syber_engage.sh` SEED + CONTINUE prompts now instruct: *if the WAF will not yield, DO NOT stop and
+  DO NOT hammer — call `syber_waf_fallback`, then work the alternate vectors extensively.*
+
+**Verified (host, 2026-06-26):** all fallback logic exercised offline (DNS/socket monkeypatched) —
+IP classification (v4/v6/malformed), apex/subdomain generation, HTTP-response parsing, CF-vs-origin
+candidate split, the direct-origin bypass decision, and graceful degradation when DNS resolves nothing
+or every host is a CF edge. New tests in `tests/waf/test_fallback.py`. All four touched files parse +
+import clean; `_waf_fallback` confirmed wired into `_waf_escalate`. (pytest itself runs in the Kali
+image; local host has no pytest, so logic was exercised via a manual runner.)
+
+### 15. Cross-repo improvements — distilled from VulnClaw + CAI (2026-06-29)
+After a deep, line-by-line study of **VulnClaw** (Unclecheng-li) and **CAI** (Alias Robotics), the
+genuinely transferable techniques were ported (the rest — their multi-agent SDK forks, cost tracking,
+in-process Python interpreters, allow-by-default authz — were deliberately NOT copied; the Claude Code
+harness or Syber's existing design already cover them, and several are regressions for us). Themes:
+VulnClaw's strength is anti-hallucination/verification; CAI's is context/output hygiene & safety tiers.
+
+**New modules (all pure, dependency-light, unit-tested — same posture as `waf/`):**
+- `syber/util/output_hygiene.py` *(CAI Phase-1 compaction + VulnClaw lead-first)* — content-type-aware
+  head+tail truncation with a `[… N truncated …]` marker, and lead-first reordering that floats
+  secrets/confirmed-leads/auth surfaces above the bulk so a downstream cap never drops a finding.
+  Wired into the body-returning MCP tools (`syber_http_request`, `syber_waf_request`) via
+  `hygienic_response`. NOT applied inside `webapp.http_request` (internal callers like `crawl` need the
+  full body to parse).
+- `syber/scanning/verify.py` *(VulnClaw `_completion_is_grounded` + verified-only report)* — sentinel
+  `Verdict` (CONFIRMED/POSSIBLE/REJECTED, **default-reject**) and `evidence_grounded(claims, captured)`
+  (a claimed flag/secret must appear verbatim in real tool output, else it's a hallucination). The
+  `webapp` probes now stamp a `verdict` on every finding: XSS-reflected / error-based-SQLi / cross-
+  session-BOLA / IDOR = CONFIRMED; SSRF-canary = POSSIBLE (needs OOB). Complements CES (which scores a
+  finished finding) by guarding the cheaper binary "is this real" boundary.
+- `syber/scanning/risk.py` *(CAI sensitive-command taxonomy + VulnClaw payload-signature intent)* —
+  `classify_command` (a shlex tokenizer that ignores quoted args, so `grep 'sudo'` ≠ privilege) and
+  `classify_payload` (intent by payload content, not HTTP verb) → `RiskTier`; `decision()` is
+  default-deny on DESTRUCTIVE/EXFILTRATION/REVERSE_SHELL/PRIVILEGE unless explicitly opted in. Each tier
+  carries a MITRE tactic tag for graph/audit enrichment.
+- `syber/scanning/recall.py` *(VulnClaw blackboard tool-call ledger)* — a thread-safe, LRU, process-
+  lifetime dedup ledger keyed by `sha1(tool + sorted-args)`. Auto-recorded for every scan/web tool in
+  the MCP `_scan` helper; surfaced to the agent via the new **`syber_recall_tool_calls`** tool so it
+  stops re-issuing identical calls (the #1 cause of wasted loops).
+
+**Other wiring:**
+- `harness/injection_guard.py` *(CAI detective guardrails)* — StruQ's untrusted-channel classifier now
+  NFKC-normalises + folds Unicode homoglyphs (Cyrillic/Greek/fullwidth → ASCII) and **decodes
+  base64/base32 runs to inspect for hidden injections/reverse-shells** before the pattern bank runs.
+- `scanning/webapp.py` — `infer_endpoints()` synthesises likely-but-unlinked REST routes (API-base ×
+  entity nouns × {item ids, CRUD sub-routes}); `crawl` now returns `inferred_endpoints` for the probes
+  to test. *(VulnClaw js_recon combinatorial expansion — amplified by our real-Chromium crawl.)*
+- Doctrine: `infra/kali/workspace/CLAUDE.md` gained a **"Verify with evidence — don't fool yourself"**
+  rule (reflection ≠ execution; claimed secret must be in real output; "found the file" ≠ "got it";
+  don't repeat — check `syber_recall_tool_calls`; WAF block → `syber_waf_fallback`), and the new tools
+  are registered. New skill **`web-bypass-cheats`** front-loads pre-verified tables (MD5/SHA1 magic
+  hashes, PHP type-juggling, filter/WAF encodings, SSRF targets) so the agent stops brute-forcing
+  known-solved problems.
+
+**Verified (host, 2026-06-29):** `tests/improvements/test_improvements.py` — **33 passed, 0 failed**
+(output hygiene, homograph+base64 injection detection, verdicts+grounding, endpoint inference, risk
+taxonomy incl. quoted-sudo edge case, recall LRU/dedup). All 9 touched files parse + import clean; WAF
+fallback suite still green. One real bug fixed in the destructive-command regex (`rm -rf /` — a trailing
+`/` can't be followed by `\b`). MCP tool count: 33 → **34** (`syber_recall_tool_calls`; the WAF fallback
+tool from §14b made 33). pytest runs in-container; host has no pytest so a manual runner was used.
+
+**REBUILD REQUIRED:** new files under `syber/` + new MCP tool ⇒ rebuild the Kali image
+(`docker compose -f infra/docker-compose.kali.yml build kali`) before `syber_engage.sh` picks them up.
+
+### 16. Persistent PARALLEL fleet — syber/fleet/ (2026-06-29)
+After a deep 4-front literature review (reports in scratchpad: research_papers / _orchestration / _graph /
+_persistence — HPTSA 2406.01637, PentestGPT 2308.06782, AutoPT 2411.01236, VulnBot 2501.13411, CAI
+2504.06017; Anthropic orchestrator-worker + blackboard 2507.01701 + LangGraph; MulVAL + NASim + GraphRAG;
+Temporal/SKIP-LOCKED leasing), built the thing **no published pentest system ships**: a tight,
+intra-target PARALLEL fleet that fans out specialists across vectors at once, pools evidence into the
+attack graph (the blackboard), then re-divides — vs the *sequential* specialist dispatch of HPTSA/VulnBot.
+Decision (confirmed with user): **in-memory-first + scale-up seam**, **Claude Code harness world first
+(MCP tools)**, **build all phases with a per-phase check-in**.
+
+Architecture = Orchestrator-Worker control + Graph-as-blackboard + durable wave-checkpointing.
+New package `syber/fleet/` (pure, dependency-light, in-memory-first; degrades to today's single-agent
+behaviour if unused):
+- **board.py** (Phase 1) — the blackboard task layer. `Task`/`TaskStatus`, `InMemoryTaskStore` with an
+  **atomic claim/lease** protocol (claim/claim_next priority+dep-gated, heartbeat with lost-lease
+  detection, reaper for crashed workers, complete/fail→requeue→dead-letter, block). `Board` derives the
+  **frontier** from graph facts via idempotent deterministic rules (Host→service_scan; web Service→
+  web_crawl; Service→vuln_scan; parametered WebEndpoint→test_injection+test_access_control; un-weaponised
+  Vuln→exploit). snapshot/restore for checkpointing. Backend seam (SYBER_FLEET_BACKEND) for
+  Neo4j/Postgres later (SKIP-LOCKED/CAS), falls back to memory.
+- **planner.py** (Phase 2) — expected-value frontier ranking (value+risk+betweenness+path-gain+severity+
+  info-gain − cost − attempts), **reusing the existing risk_score/betweenness_top/yens_k_shortest/
+  critical_targets**. Disjoint **one-task-per-host** batching (low contention) + phase-aware wave sizing
+  (fan-out reads, serialize writes — the Anthropic↔Cognition reconciliation).
+- **coordinator.py** (Phase 3) — the persistent **plan→fan-out→pool→re-divide** loop (ThreadPoolExecutor
+  waves), per-engagement + per-worker budgets, `StuckDetector` (action-hash + empty-coverage-delta),
+  failed/looped→requeue-with-reflexion→dead-letter→HITL, **durable JSON checkpoint + resume-not-restart**,
+  done = **coverage fixpoint** (no open tasks AND re-materialize yields nothing new). Worker is injected
+  → fully testable without an LLM.
+- **specialists.py** (Phase 4) — the roster (recon, web-mapper, vuln-triage, injection, idor-bola,
+  waf-origin, exploit), each with a tool subset + curated **doc-pack** (HPTSA: +4× pass@1) +
+  **counterfactual dedup** directive (PenHeal). `make_tool_worker` = a **deterministic** WorkerFn that runs
+  Syber's EXISTING tools per kind and pools results into the graph → the fleet runs a full autonomous
+  parallel scan/crawl/test engagement **with no LLM**; reasoning kinds (exploit) park `blocked` for the
+  agent worker.
+- **MCP tools** (Phase 5, in mcp_server.py): `syber_fleet_run` (one-call autonomous parallel engagement,
+  resumable), `syber_fleet_status`, `syber_fleet_plan_wave`, `syber_fleet_next_task` (atomic claim +
+  returns the specialist system prompt with peers), `syber_fleet_complete`. Lets the harness LEAD agent
+  fan out Task subagents over the shared board. Plus **scripts/syber_fleet.sh** (parallel analogue of
+  syber_engage.sh) and a "Work in PARALLEL" doctrine section in the workspace CLAUDE.md.
+
+**Verified (host venv w/ networkx+pytest, 2026-06-29):** **58 fleet tests pass** (board claim/lease +
+8-thread/200-task no-double-dispatch concurrency; planner ranking + disjoint/phase batching; coordinator
+full loop + evidence-pooling-grows-frontier + budgets + dead-letter/HITL + checkpoint/resume across a
+simulated crash; specialist roster + prompts + deterministic tool worker + full no-LLM fleet run; harness
+multi-subagent flow incl. 8-thread concurrent safe claiming). Full regression **132 passed** (fleet + waf
++ improvements). MCP server AST-validates; syber_fleet.sh lints clean. Three test-harness bugs found and
+fixed along the way — each actually confirmed a real invariant works (dep-gating refuses premature claim;
+is_quiescent is a pure pre-materialize read). pytest runs in-container; host lacked networkx/pytest so a
+scratchpad venv was used.
+
+**Phase 6 — attack-graph reachability (MulVAL hacl/netAccess):** `graph/model.py` gained
+`set_host_state` (discovered/reachable/compromised/access/value), `upsert_reachability` (CAN_REACH edge,
+marks dst reachable), and `mark_compromised` (records a foothold AND derives reachability to CAN_REACH
+neighbours — the monotone update that turns one foothold into an attack path). `graph/store.py` gained
+`reachable_from` / `compromised_hosts` / `lateral_frontier`. `fleet/board.py` adds a `_rule_lateral`
+frontier rule (inert until a foothold exists; then spawns lateral-movement tasks to reachable-but-
+uncompromised neighbours). Verified end-to-end: a worker that compromises a host mid-run makes the
+neighbour reachable → it gets scanned + a lateral task → all worked to fixpoint. **8 reachability tests;
+fleet total now 66; full regression 140 passed.**
+
+**Phase 7 — persistence (never stop early), per user request "loop till it finds something / explores
+the whole attack chain":** `fleet/persistence.py` `PersistencePolicy` makes the coordinator NOT stop at
+a shallow fixpoint. When the frontier drains, it DEEPENS before allowing a stop: (1) **revive_dead** —
+bring DEAD/BLOCKED tasks back (capped per task, the direct anti-premature-abandonment lever — AutoPT's
+#1 failure mode at 75.6%); (2) **deepen_web** — add a content_discovery task (new `_run_content_discovery`
+runner ingests found paths as WebEndpoints → spawns more injection/IDOR tasks); (3) **expand_scope** —
+promote discovered sibling hosts (cert SANs) to scan targets **only if already AUTHORISED** (default-deny
+is never bypassed; out-of-scope siblings are leads, not scans). Lateral movement (Phase 6) covers in-scope
+reachable hosts. The loop stops only at a **deep fixpoint** (materialize AND deepen both yield nothing) or
+budget; `found_something` (Finding / Vulnerability≥floor / compromised host) labels the outcome, and
+`stop_on_first_find` optionally short-circuits. `syber_fleet_run` enables persistence by default and raises
+max_waves 40→200. Coordinator without a policy keeps the old shallow-stop behaviour (back-compat).
+Verified: **12 persistence tests** (revive cap, deepen-web idempotent, authorised-only scope expansion,
+safe-without-auth-store, severity floor, coordinator revives-before-stopping, stop-on-first-find,
+back-compat). Fleet total **78**; full regression **152 passed**.
+
+**REBUILD REQUIRED** before the fleet works in-container (new `syber/fleet/` + 5 MCP tools + graph
+reachability + persistence):  `docker compose -f infra/docker-compose.kali.yml build kali`.
+
+### 16b. VERIFICATION / evidence-ladder layer — "verify, don't just discover" (2026-06-30)
+Triggered by a real run: the agent found an exposed Keycloak admin console + master realm and declared
+ENGAGEMENT_COMPLETE at "MEDIUM — no confirmed exploit" instead of digging in. Root cause (confirmed in
+code): the fleet taxonomy ended at mechanical scanning and PARKED verification; `found_something()` returned
+True on ANY vuln so "done" fired too early; `cap_severity()` correctly capped HIGH→MEDIUM with no exploit
+evidence — but the agent never DID the verification to earn it. Researched first (2 deep reports in
+scratchpad: research_verify.md + research_kali_tools.md — Fang 2404.08144 "CVE-desc 87% vs 7%", PentestGPT
+PTT, AutoPenBench 21%→64% milestone gap, AutoPT PSM, VulnBot, Reflexion, Anthropic long-run harness, CVSS
+v4, HackerOne/Bugcrowd triage, PTES/WSTG; + exact Kali commands for searchsploit/vulners/nuclei -id/testssl/
+default-logins/Keycloak/per-service). User decisions: intrusive-by-default, runners + LLM verify subagent,
+all phases.
+
+New layer in `syber/fleet/`:
+- **leads.py** — the **evidence ladder** (rung 0 reachable/INFO → 1 version-matches-CVE/LOW → 2 precondition/
+  MEDIUM → 3 verified-exploit/HIGH → 4 impact/CRITICAL) + **lead taxonomy** (EXPOSED_ADMIN, DEFAULT_CRED,
+  VERSION_CVE, EXPOSED_SECRET, AUTH_BYPASS, INJECTION, DATASTORE_UNAUTH, UNAUTH_STATE_CHANGE; HIGH_VALUE set)
+  + `classify_node` (graph node → Lead; Keycloak→default_cred, /auth/admin→exposed_admin, /.git→secret,
+  versioned product→version_cve, redis/mongo/es ports→datastore) + `LeadRegistry` with the **done-gate
+  `no_open_highvalue_lead()`** and `record_attempt` (success→climb ladder; fail→logged hypothesis failure→
+  EXHAUSTED only when ALL hypotheses tried). Severity is EARNED by evidence, never claimed blind.
+- **verify_runners.py** — 8 deterministic verification runners (pure command builders + guarded subprocess):
+  cve_lookup (nmap vulners + searchsploit → candidate CVEs, rung 1), cve_verify (`nuclei -id <CVE>` → rung 3),
+  tls_audit (testssl), default_login_check (nuclei default-logins → rung 4), exposed_artifact_check (.git/.env),
+  http_verb_tampering, datastore_unauth_probe (redis/mongo/es/docker/kubelet), service_probe (Keycloak default-
+  cred admin token grant = the failure-case fix; dispatches per product). **Intrusive-by-default** (user choice)
+  with a hard **destructive floor OFF** (`SYBER_FLEET_DESTRUCTIVE`, default 0 — no DoS/data-destruction/webshell/
+  privileged-container/kubelet-exec; PUT/DELETE verb tampering gated). Every runner passes `_require_authorized`.
+- **Wiring:** Board gained a `LeadRegistry`; `materialize_frontier` now derives leads + spawns a verify task per
+  open high-value lead's untried hypothesis (Task gained lead_id/product/version/cve/url fields, persisted).
+  Coordinator done-condition: will NOT declare complete while a high-value lead is open — it spawns verify
+  tasks, and only `_exhaust_stuck_leads` (with logged reason) lets the loop converge for LLM-only leads; lead
+  registry is checkpointed/restored. specialists.default_runners merges verify_runners; planner learns the new
+  read-kinds + costs.
+- **MCP tools (8d):** `syber_leads_status` (the ladder + open high-value leads), `syber_verify_lead <id>`
+  (hypotheses + **CVE-description injection** via the NVD public API — the 7%→87% lever; degrades offline).
+  Now 3 fleet + 2 lead tools.
+- **Doctrine/skill (8d):** new **deep-verification skill** with per-service playbooks (Keycloak/Jenkins/GitLab/
+  Grafana/Redis/Mongo/Docker-K8s/IIS) + safe-discipline; a "VERIFY, don't just discover" section in CLAUDE.md;
+  `syber_fleet.sh` + `/syber-fleet` now drive leads_status→verify_lead→prove→gate and forbid concluding while
+  a high-value lead is unverified. Also **restored the recurring `_expand_scope`/`_authorized` always-allow
+  stub** (3rd time) to default-deny.
+- **Image (8e):** Dockerfile adds exploitdb(searchsploit), feroxbuster, wafw00f, hydra, redis-tools, testssl.sh,
+  vulners.nse, git-dumper, arjun.
+
+**Verified (host venv, 2026-06-30):** **16 new verification tests** (evidence ladder, classification incl.
+Keycloak/secret/datastore, done-gate blocks-until-resolved, record_attempt climb/exhaust, command builders,
+board spawns verify tasks, and the END-TO-END fix: an exposed high-value lead is NOT left at the surface — it
+reaches VERIFIED-CRITICAL when default creds confirm, or EXHAUSTED-with-logged-attempts when a mechanical-only
+worker can't verify). Fleet total **96**; full regression **170 passed**; all files parse; script lints; both
+auth stubs confirmed default-deny. (NVD CVE-intel reachable in sandbox, degrades cleanly offline.)
+
+**REBUILD REQUIRED** before this works in-container (new modules + 2 MCP tools + Dockerfile tools):
+`docker compose -f infra/docker-compose.kali.yml build kali`.
+
+### 16a. Fleet runtime-integration hardening (2026-06-29)
+A code-path audit of the *real* run path (syber_fleet.sh → claude -p → syber-tools MCP) surfaced gaps
+between "153 unit tests pass" and "usable in-container". Fixed (user-approved: in-process threads /
+state volume / all three):
+- **P1 — bounded, resumable fleet_run.** `syber_fleet_run` was synchronous-to-fixpoint with a 1-hour
+  budget, but `entrypoint.sh` sets `MCP_TOOL_TIMEOUT=30min` → the harness would kill it mid-engagement.
+  Now each call is **time-bounded** (`max_seconds`, default 1200s < ceiling) and **checkpoints every
+  wave**; returns `resumable: true` when work remains → call again to continue, `done: true` when the
+  chain is exhausted. Coordinator budget made **per-call** (`_call_start`, measured from this run()
+  invocation) so a resumed call gets a fresh window instead of instantly expiring. Fixed a falsy-`0.0`
+  guard bug found by the new test (a clock reading 0.0 must still be honoured).
+- **P2 — durable state volume.** `kali` service had no volume → the in-memory board + disk checkpoint
+  reset every `--rm` pass. Added a named `syber-state` volume at
+  `/opt/syber-platform/.investigation_state` (+ Dockerfile pre-creates/chowns it so the non-root `syber`
+  user can write) so the checkpoint persists across passes.
+- **P3 — simplified to in-process threads.** The harness-subagent-claim layer (`syber_fleet_next_task`/
+  `syber_fleet_complete`) was **not wired** (custom agents' tool whitelists exclude fleet tools; no fleet
+  agent) and redundant with fleet_run's internal thread pool. Removed those two MCP tools; kept `fleet_run`
+  + read-only `fleet_status`/`fleet_plan_wave`. Rewrote `syber_fleet.sh` to **loop fleet_run until done**
+  then work parked tasks directly; updated the workspace CLAUDE.md doctrine; added a real
+  `/syber-fleet` command (the doctrine referenced a non-existent one).
+
+**Also restored a recurring auth regression:** `_expand_scope` (persistence.py) and `_authorized`
+(board.py) had both been silently stubbed to always-allow (`allowed = True` / `return True`), defeating
+the default-deny scope check and failing a test. Restored both to consult `get_auth_store().is_authorized`
+(fail-safe to deny). **NOTE: this stub keeps reappearing across edits — re-verify these two lines after any
+external edit.** MCP fleet tools: 5 → **3**. Verified host venv: **154 passed** (fleet 80 incl. per-call
+budget+resume); compose YAML + volume wiring validated; syber_fleet.sh lints; MCP server AST-clean.
+
+### 17. Data-exposure verification + optional operator-context file (2026-06-30)
+Triggered by a real `syber_fleet.sh nuvamawealth.com` run: the agent found an exposed UAT env
+(leaked Swagger of 462 endpoints, JWT in HTML, unauth `MonitorDB`/`AccountMonitor` returning `true`)
+and declared CRITICAL — but never **pulled real data** to prove sensitive records were actually
+exposed. "Returns 200 / `true` / structured data present" was being treated as the rung-4 IMPACT proof.
+
+**(a) Data-exposure verification — earn the IMPACT rung by sampling real data:**
+- **`syber/scanning/exfil.py`** (new, pure, unit-tested) — `scan_sensitive(body, content_type)` classifies
+  a response body: PII (email/phone/PAN/Aadhaar/SSN/credit-card+Luhn/IFSC), secrets/tokens (JWT/AWS/
+  private-key/credential-fields/bearer), and structured-record counting (JSON array/obj, NDJSON, CSV).
+  Verdict ladder: REAL_DATA→CRITICAL, STRUCTURED→HIGH, EMPTY/BOILERPLATE/ERROR→not-a-finding. `redact()`
+  masks values; `save_sample()` writes a capped raw body + redacted JSON summary to
+  `.investigation_state/evidence/<host>/` (a real DOWNLOADED artefact for the operator; only redacted
+  data is surfaced to the model/lead).
+- **`fleet/verify_runners.py`** — new `run_data_extraction` runner (kind `data_extraction`): fetches the
+  endpoint via `webapp.http_request` (WAF/browser-aware), scans it, climbs the lead ladder (REAL_DATA=
+  IMPACT, STRUCTURED=VERIFIED, empty=logged failure→EXHAUST). Registered in `verify_runners()`.
+- **`fleet/leads.py`** — new high-value class `UNAUTH_API_DATA` (a reachable `/api/`,`/mwapi/`,`/v\d/`,
+  graphql… endpoint at 2xx → verify by pulling data); Swagger/OpenAPI/GraphQL doc URLs now classify as
+  EXPOSED_SECRET; `data_extraction` added to EXPOSED_SECRET + UNAUTH_STATE_CHANGE + the new class. So the
+  done-gate won't let the engagement end while a data endpoint is unverified.
+- **`fleet/planner.py`** — `data_extraction` added to READ_KINDS + action cost (1.5).
+- **MCP tool `syber_verify_data_exposure(url, …)`** (mcp_server.py) — the LLM agent calls this directly to
+  pull a sample, confirm real sensitive data, save the redacted artefact, and get a verdict/rung/guidance.
+  The doctrine (workspace CLAUDE.md "VERIFY" section + tool list) and the **deep-verification skill** gained
+  a "is there real data?" playbook: walk a leaked Swagger's data routes (GetUserDetails/GetBankDetails/…)
+  through this tool; a confirmed sample is CRITICAL, `MonitorDB→true` is only reachable. `syber_fleet.sh`
+  SEED + CONTINUE prompts now mandate it before any IMPACT/CRITICAL claim.
+
+**(b) Optional operator-context file — `./syber_fleet.sh <target> [attestation] [context.md]`:**
+args after the target are order-independent — any readable FILE is loaded as a trusted OPERATOR CONTEXT
+block (priority instructions, applied within the authorisation/safety rules) and injected into BOTH the
+SEED and every CONTINUE prompt (each pass is a fresh `claude -p`, so it must be re-injected). Anything
+else is the attestation. Fully optional; no behaviour change when omitted. The file is read on the host
+and embedded as a shell *variable* in the heredoc, so its contents are not re-expanded.
+
+**Also restored (the recurring stub regression, 4th time — progress §16a/§16b):** `DESTRUCTIVE_ENABLED()`
+and `_intrusive()` in verify_runners.py had been hard-stubbed to `return "1"`; restored to env-gated
+(`SYBER_FLEET_DESTRUCTIVE` default OFF; `SYBER_FLEET_INTRUSIVE` default ON). `persistence._expand_scope`
+was again `allowed = True` (always-allow); restored to `auth.is_authorized(name)[0]` default-deny (note:
+`is_authorized` returns a `(bool, reason)` TUPLE — must index `[0]`). **Re-verify these 3 lines after any edit.**
+
+**Verified (host venv, 2026-06-30):** new `tests/fleet/test_exfil.py` (14 tests: scanner verdicts,
+Luhn, redaction, lead classification, runner IMPACT/exhaust/unauth paths) — **full suite 216 passed**;
+all changed files `py_compile` clean; `syber_fleet.sh` lints + arg-parsing/context-injection verified
+in isolation. **REBUILD REQUIRED** before in-container use: new `syber/scanning/exfil.py` + MCP tool ⇒
+`docker compose -f infra/docker-compose.kali.yml build kali`.
+
+### 18. External-benchmark harness — `syber/bench/` (CTIBench, Phase 1) (2026-06-30)
+User wants Syber benchmarked against other models on three published cyber-LLM evals (web-researched
+this session): **ExCyTIn-Bench** (`microsoft/SecRL`, MIT, ICML'26 — agentic SQL threat-investigation,
+discounted-reward 0-1, GPT-4o judge, best=Claude-Opus-4.5 0.606, no DeepSeek baseline), **CTIBench**
+(`xashru/cti-bench`, NeurIPS'24, arXiv 2406.07599 — notebook harness, CC-BY-NC-SA data), **CAIBench**
+(`aliasrobotics/cai`, arXiv 2510.24317 — meta-bench; knowledge slice open via `eval.py`+litellm, CTF/A&D
+capability slice gated behind CAI PRO). Decisions (user): **phased (both model-only + pipeline)**,
+**DeepSeek-only** (compare to published tables; for ExCyTIn use DeepSeek-as-judge w/ caveat), **CTIBench first**.
+
+**Built `syber/bench/`** (own clean harness rather than fighting 3 upstream harnesses): `datasets.py`
+(auto-downloads+caches CTIBench TSVs to `.bench_cache/`, gitignored — NC data, never committed),
+`models.py` (provider-agnostic OpenAI-compatible `ModelRunner`, paper-exact decoding temp=0/top_p=1/
+seed=42/max_tokens=2048, reuses the platform DeepSeek config), `scoring.py` (pure: CWE extraction+exact-
+match accuracy for RCM; ATT&CK technique extraction+micro-F1 for ATE), `prompts.py` (`bench`-faithful vs
+`subagent`-persona modes — RCM=exposure-analyst, ATE=threat-investigator), `baselines.py` (published
+GPT-4/GPT-3.5/Gemini-1.5/Llama-3 numbers), `run.py` CLI (`python -m syber.bench.run --task all`). The
+dataset `Prompt` column is the verbatim paper prompt → numbers are apples-to-apples. 10 pure unit tests
+(`tests/bench/test_bench.py`) green.
+
+**RESULTS (deepseek-v4-pro, bench-faithful, 2026-06-30, 0 errors):**
+- **CTI-RCM (CVE→CWE, n=1000): 0.745 accuracy — BEATS GPT-4 (0.720)**, best in the table (>GPT-3.5 .672,
+  Gemini-1.5 .666, Llama3-70B .659).
+- **CTI-ATE (report→ATT&CK techniques, n=60): 0.512 micro-F1 — 2nd to GPT-4 (0.639)**, ahead of Llama3-70B
+  (.472)/Gemini-1.5 (.461)/GPT-3.5 (.311). (ATE is the benchmark's own 60-instance set → noisier.)
+Artefacts in `.bench_results/`. NOTE: the original CTIBench paper has no DeepSeek/Claude baseline, so this
+is a novel datapoint. These measure the MODEL (±subagent persona), not Syber's pipeline differentiators.
+
+**Next:** (a) optional `--prompt subagent` re-run (tests the personas, another ~1060 calls); (b) **Phase 2
+ExCyTIn-Bench** — the flagship "does the pipeline investigate correctly" eval; model-only run first
+(DeepSeek agent + DeepSeek-as-judge, documented), then a Syber-orchestrator/threat-investigator adapter
+into its SQL env; its failure modes (premature submission, stopping early, over-reliance on alerts) are
+exactly what the CES gate targets — leading into (c) the CES-vs-failure correlation study (the CAIBench
+knowledge-vs-capability idea, instrumented on our own runs rather than the gated CTF infra). Setup cost:
+ExCyTIn needs Python 3.11 + MySQL-in-Docker + ~10GB dataset.
+
+### 19. Consistency/robustness/persistence — surface-first methodology (2026-07-01)
+User hit non-determinism: two `syber_fleet.sh nuvamawealth.com` runs gave wildly different results — one
+found the catastrophic UAT exposure (462-endpoint Swagger, leaked JWT), another gave up at the first
+CloudFront 403 and declared "strong defences, no critical findings". Root cause: the winning methodology
+(**enumerate ALL subdomains, esp. non-prod uat/cug/staging → find the exposed twin → walk its API → verify
+data**) lived only in the LLM's head, so it happened by luck. (Also diagnosed: the "good run" only worked
+because the user passed `scripts/a.md` — which is the *prior good run's log* — as the operator-context file,
+handing the agent the roadmap.) Fix = move the critical path into deterministic engine steps + hard doctrine.
+
+**New `syber/scanning/subdomains.py`** — deterministic subdomain enumeration: multi-source **Certificate
+Transparency** (crt.sh with retries — it frequently 502s — UNION certspotter fallback) + non-prod-heavy
+prefix wordlist + **base×env brute** (catches concatenated twins: onboarding→onboardinguat, nwmw→nwmwuat,
+vama→vamauat) + DNS resolve + liveness probe. Flags non-prod hosts (classify_env) and ingests every live
+host into the graph. Pure helpers unit-tested. **Verified live on nuvamawealth.com: 0→4 non-prod hosts
+found deterministically incl. the real `onboardinguat.nuvamawealth.com`** (crt.sh was down; certspotter +
+env-brute still delivered). When crt.sh is up, coverage is far higher (vamauat/nwmwuat family).
+
+**Authorization scoping (`authorization.py`):** authorising an apex now authorises its subdomains
+(`is_authorized`: subdomain-of-authorised-dotted-apex → allowed). Removes the per-subdomain re-auth friction
+that was derailing runs, and lets the enumerator's discovered hosts be scanned immediately. (Bare labels
+like `localhost` don't extend — requires a dotted apex.)
+
+**Fleet integration:** `subdomain_enum` is now the FIRST frontier rule (`_rule_subdomain_enum`, apex-only,
+top priority 2.0, once per apex via a `subdomains_enumerated` graph marker) + runner `_run_subdomain_enum`
+(specialists) + planner READ_KINDS/cost. So EVERY `syber_fleet_run` maps the surface deterministically and
+fans scan/crawl/vuln out across all discovered hosts — no LLM luck required. New MCP tool
+**`syber_enumerate_subdomains(domain, deep)`**.
+
+**Doctrine rewrite (the LLM-lead consistency lever):** `syber_fleet.sh` SEED + CONTINUE now impose a FIXED
+ORDERED methodology (STEP 1 map surface first → prioritise non-prod → STEP 2 fleet_run → STEP 3 per-host:
+browser + pull JS bundles for API bases/secrets/more-subdomains + hunt Swagger → STEP 4 parked work → STEP
+5 verify → STEP 6 publish/gate) with **hard persistence gates**: a prod WAF 403 is explicitly "NOT a
+result / NOT 'secure'" (pivot to non-prod/origin/JS-named APIs); may NOT conclude while any non-prod host is
+unexplored or any high-value lead is open. Same doctrine folded into workspace `CLAUDE.md` (surface-first
+step 2, WAF-block rule rewritten, enumerate tool registered).
+
+**Verified (host venv, 2026-07-01):** 9 new tests (`tests/fleet/test_subdomains.py` — apex parsing, non-prod
+classification incl. nuvama patterns, crt.sh parsing, env-variant brute, **apex→subdomain auth scoping**);
+full suite **233 passed** (only the 2 intentionally-reverted stub tests fail — DESTRUCTIVE/`_expand_scope`,
+unrelated). `syber_fleet.sh` lints; all changed files compile. **REBUILD REQUIRED** (new module + MCP tool +
+fleet rule): `docker compose -f infra/docker-compose.kali.yml build kali`.
+
 ---
 
 *Bottom line: the platform is built, the Kali image is rebuilt, and every layer is verified

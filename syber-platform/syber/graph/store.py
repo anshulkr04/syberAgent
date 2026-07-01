@@ -138,6 +138,25 @@ class KnowledgeGraph:
             if str(d.get("criticality", "")).lower() in {"critical", "cii", "high"}
         ]
 
+    # -- reachability / foothold state (attack-graph layer, MulVAL) ---------- #
+    def reachable_from(self, host: str) -> list[str]:
+        """Hosts ``host`` can reach via CAN_REACH edges (MulVAL hacl)."""
+        if not self.g.has_node(host):
+            return []
+        return [dst for _, dst, d in self.g.out_edges(host, data=True)
+                if d.get("edge_type") == "CAN_REACH"]
+
+    def compromised_hosts(self) -> list[str]:
+        """Hosts on which a foothold has been recorded (execCode)."""
+        return [n for n, d in self.g.nodes(data=True)
+                if d.get("label") == "Host" and d.get("compromised")]
+
+    def lateral_frontier(self) -> list[str]:
+        """Hosts that are reachable but not yet compromised — the lateral-movement
+        frontier a parallel fleet should fan out across next."""
+        return [n for n, d in self.g.nodes(data=True)
+                if d.get("label") == "Host" and d.get("reachable") and not d.get("compromised")]
+
     def get_context(self, entity_id: str, k_paths: int = 5) -> GraphContext:
         """Assemble the full graph context for the get_graph_context tool."""
         targets = [t for t in self.critical_targets() if t != entity_id]

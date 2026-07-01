@@ -48,6 +48,7 @@ from urllib.parse import parse_qsl, urljoin, urlparse, urlunparse
 
 from ..recon.browser_recon import browser_available
 from .active_scan import NotAuthorized, _require_authorized  # noqa: F401  (re-export NotAuthorized)
+from .verify import Verdict, classify_verdict
 
 AB = "agent-browser"
 
@@ -197,6 +198,72 @@ def extract_surface(html: str, base_url: str) -> dict[str, Any]:
                       "method": f["method"], "params": [i["name"] for i in f["inputs"]]})
         params.update(i["name"] for i in f["inputs"])
     return {"links": sorted(set(links)), "forms": forms, "params": sorted(params)}
+
+
+# --------------------------------------------------------------------------- #
+# Combinatorial endpoint inference — synthesise endpoints the crawl never saw
+# --------------------------------------------------------------------------- #
+# REST collections rarely expose every verb/sub-resource as a crawlable link.
+# Given the API bases and entity nouns the crawl DID surface, we synthesise the
+# likely-but-unlinked endpoints (collection, item, and common admin/export
+# sub-routes) so test_access_control / test_injection have a real attack surface
+# to probe — modelled on VulnClaw's js_recon base × entity × verb expansion.
+_API_BASE_RX = re.compile(r"/(?:api|rest|v\d+|graphql|internal|admin)(?:/|$)", re.I)
+# Plural-ish entity segment: a word, not a file, not already an id.
+_ENTITY_RX = re.compile(r"^[a-z][a-z0-9_-]{2,40}$", re.I)
+_ID_RX = re.compile(r"^(?:\d+|[0-9a-fA-F-]{8,})$")
+_ITEM_SUFFIXES = ["1", "0", "{id}"]
+_SUBROUTES = ["export", "search", "all", "admin", "config", "settings", "me"]
+_NON_ENTITY = {"api", "rest", "graphql", "internal", "static", "assets", "public",
+               "js", "css", "img", "images", "fonts", "favicon.ico", "index.html"}
+
+
+def infer_endpoints(known_urls: list[str], entities: list[str] | None = None,
+                    max_out: int = 80) -> list[str]:
+    """Synthesise candidate endpoints from discovered API bases + entity nouns.
+
+    Returns same-host URLs NOT already in ``known_urls`` (deduped, capped). Pure
+    string work — no network. The caller decides whether to probe them."""
+    if not known_urls:
+        return []
+    base_host = urlparse(known_urls[0]).netloc
+    scheme = urlparse(known_urls[0]).scheme or "https"
+    known = {urlunparse(urlparse(u)._replace(query="", fragment="")) for u in known_urls}
+
+    bases: set[str] = set()           # e.g. "/api/v1"
+    nouns: set[str] = set(entities or [])
+    for u in known_urls:
+        pu = urlparse(u)
+        if pu.netloc != base_host:
+            continue
+        segs = [s for s in pu.path.split("/") if s]
+        if _API_BASE_RX.search(pu.path):
+            # base = path up to and including the api/version marker
+            keep: list[str] = []
+            for s in segs:
+                keep.append(s)
+                if re.fullmatch(r"api|rest|v\d+|graphql|internal|admin", s, re.I):
+                    bases.add("/" + "/".join(keep))
+        for s in segs:
+            sl = s.lower()
+            if _ENTITY_RX.match(s) and not _ID_RX.match(s) and "." not in s and sl not in _NON_ENTITY:
+                nouns.add(sl)
+    if not bases:
+        bases.add("/api")             # sensible default base when none surfaced
+
+    out: list[str] = []
+    for base in sorted(bases):
+        for noun in sorted(nouns):
+            coll = f"{scheme}://{base_host}{base.rstrip('/')}/{noun}"
+            cands = [coll] + [f"{coll}/{sfx}" for sfx in _ITEM_SUFFIXES] \
+                + [f"{coll}/{sub}" for sub in _SUBROUTES]
+            for c in cands:
+                norm = urlunparse(urlparse(c)._replace(query="", fragment=""))
+                if norm not in known and c not in out:
+                    out.append(c)
+                    if len(out) >= max_out:
+                        return out
+    return out
 
 
 # --------------------------------------------------------------------------- #
@@ -353,10 +420,40 @@ def _waf_escalate(url: str, method: str, headers: dict[str, str], body: str | No
         return result
     except WAFBlockError as e:
         out["waf_block"] = e.to_dict()
-        return out
+        return _waf_fallback(url, method, headers, body, out)
     except Exception as e:  # noqa: BLE001 - never let WAF traversal break a probe
         out["waf_error"] = str(e)
+        return _waf_fallback(url, method, headers, body, out)
+
+
+def _waf_fallback(url: str, method: str, headers: dict[str, str], body: str | None,
+                  out: dict[str, Any]) -> dict[str, Any]:
+    """The WAF dead-end pivot: when traversal cannot clear Cloudflare, look for an
+    unprotected path (a non-proxied origin IP) and hand back a ranked alternate-
+    vector plan so the engagement keeps finding vulnerabilities instead of grinding
+    the protected edge. If a direct origin answers, return THAT response (the WAF is
+    bypassed); otherwise attach the vector plan to the original challenge response."""
+    try:
+        from ..waf.fallback import explore_alternate_vectors
+    except Exception:  # noqa: BLE001 - fallback module optional
         return out
+    try:
+        fb = explore_alternate_vectors(url)
+    except Exception as e:  # noqa: BLE001 - pivot is best-effort, never raises out
+        out["waf_fallback_error"] = str(e)
+        return out
+    if fb.direct_hit is not None:
+        # WAF bypassed at the origin — return the real, un-WAF'd response so all
+        # downstream probes (crawl/IDOR/injection) operate on actual content.
+        result = dict(fb.direct_hit)
+        result.setdefault("headers", {})
+        result["waf_bypassed"] = True
+        result["origin_ip"] = fb.origin_ip
+        result["waf_challenge"] = out.get("waf_challenge")
+        result["waf_fallback"] = fb.to_dict()
+        return result
+    out["waf_fallback"] = fb.to_dict()
+    return out
 
 
 _WAF_SINGLETON = None
@@ -413,12 +510,18 @@ def crawl(target: str, max_pages: int = 40, max_depth: int = 2,
     if browser_available():
         _ab(["--session", sess, "close", "--all"])
     graph = _ingest_crawl_to_graph(host, endpoints, all_forms)
+    # Synthesise likely-but-unlinked REST endpoints from the bases/entities seen,
+    # so the access-control / injection probes have surface the crawl couldn't link.
+    all_params = sorted({p for ep in endpoints for p in ep.get("params", [])})
+    inferred = infer_endpoints([ep["url"] for ep in endpoints], entities=None)
     from ..audit.log import get_audit_log
     get_audit_log().write("webapp_crawl", {"target": host, "pages": len(seen),
-                                            "endpoints": len(endpoints), "forms": len(all_forms)},
+                                            "endpoints": len(endpoints), "forms": len(all_forms),
+                                            "inferred": len(inferred)},
                           "webapp")
     return {"target": host, "pages_crawled": len(seen), "endpoint_count": len(endpoints),
-            "endpoints": endpoints, "forms": all_forms, "graph": graph}
+            "endpoints": endpoints, "forms": all_forms, "params": all_params,
+            "inferred_endpoints": inferred, "graph": graph}
 
 
 def _ingest_crawl_to_graph(host: str, endpoints: list[dict], forms: list[dict]) -> dict[str, Any]:
@@ -485,7 +588,8 @@ def test_access_control(url: str, id_param: str | None = None,
             findings.append({"family": "tenant/object-level (cross-session)",
                              "detail": "Account B retrieved Account A's object with a 2xx and "
                                        "matching content — ownership not enforced.",
-                             "url": url, "evidence": _eviref(as_b)})
+                             "url": url, "verdict": str(classify_verdict(confirmed=True)),
+                             "evidence": _eviref(as_b)})
 
     # --- Family 1/2: Direct Object Reference — vary the id ------------------
     candidate_ids = list(known_other_ids or [])
@@ -503,7 +607,8 @@ def test_access_control(url: str, id_param: str | None = None,
             findings.append({"family": "direct-object-reference (IDOR)",
                              "detail": f"Object id {oid} returned a distinct 2xx object via the "
                                        f"same session — likely another user's resource.",
-                             "url": other_url, "evidence": _eviref(r)})
+                             "url": other_url, "verdict": str(classify_verdict(confirmed=True)),
+                             "evidence": _eviref(r)})
 
     # --- Family 5 (chained) is driven by known_other_ids above; Family 4
     #     (workflow/state) and Family 2 (action-level writes) require caller-
@@ -607,6 +712,7 @@ def test_injection(url: str, params: list[str] | None = None, cookies: str | Non
                 findings.append({"type": "reflected-xss", "param": param,
                                  "payload": payload, "url": _with_param(url, param, payload),
                                  "detail": "Payload reflected unencoded in the HTML response.",
+                                 "verdict": str(classify_verdict(confirmed=True)),
                                  "evidence": _eviref(r)})
                 break
         # --- error-based SQLi ---
@@ -618,6 +724,7 @@ def test_injection(url: str, params: list[str] | None = None, cookies: str | Non
                 findings.append({"type": "sql-injection (error-based)", "param": param,
                                  "payload": payload, "url": _with_param(url, param, payload),
                                  "detail": f"DBMS error signature surfaced: {errs[0]}",
+                                 "verdict": str(classify_verdict(confirmed=True)),
                                  "evidence": _eviref(r)})
                 break
         # --- SSRF canary ---
@@ -629,6 +736,9 @@ def test_injection(url: str, params: list[str] | None = None, cookies: str | Non
                              "url": _with_param(url, param, f"http://{SSRF_CANARY_HOSTS[0]}/"),
                              "detail": "Parameter appears to trigger a server-side fetch of a "
                                        "user-supplied URL — verify with an out-of-band canary.",
+                             # A cloud-metadata marker is a strong signal but SSRF needs OOB
+                             # proof, so this ships as POSSIBLE, never an auto-CONFIRMED finding.
+                             "verdict": str(classify_verdict(confirmed=False, possible=True)),
                              "evidence": _eviref(r)})
 
     verdict = "vulnerable" if findings else "no_injection_detected"

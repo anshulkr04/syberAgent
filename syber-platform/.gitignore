@@ -7,3 +7,7 @@ __pycache__/
 .env
 syber/scoring/calibration/platt_scaler.joblib
 dist/*.tar.gz
+
+# benchmark dataset cache (CTIBench data is CC-BY-NC-SA — do not commit)
+.bench_cache/
+.bench_results/

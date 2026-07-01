@@ -77,6 +77,11 @@ services:
       NEO4J_PASSWORD: changeme
       DATABASE_URL: postgresql://postgres:changeme@postgres:5432/syber_memory
       KAFKA_BOOTSTRAP: kafka:9092
+    # Durable engagement state so the fleet checkpoint survives across passes
+    # (syber_fleet.sh runs each pass in a fresh --rm container). The graph itself
+    # persists in Neo4j; this keeps task done-status so resume doesn't re-scan.
+    volumes:
+      - syber-state:/opt/syber-platform/.investigation_state
     networks: [syber]
     stdin_open: true
     tty: true
@@ -84,3 +89,6 @@ services:
 networks:
   syber:
     driver: bridge
+
+volumes:
+  syber-state:

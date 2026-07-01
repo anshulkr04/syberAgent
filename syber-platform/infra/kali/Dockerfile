@@ -20,10 +20,22 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       python3 python3-venv python3-pip \
       curl git ca-certificates jq xz-utils sudo \
       chromium fonts-liberation \
+      exploitdb feroxbuster wafw00f hydra redis-tools \
  && rm -rf /var/lib/apt/lists/*
+# Deep-verification tooling (Phase 8): exploitdb=searchsploit (CVE correlation),
+# feroxbuster (recursive content discovery), wafw00f (WAF id), hydra + nuclei
+# default-logins (credential verification), redis-tools (datastore probe). testssl.sh
+# and git-dumper are fetched below (not reliably packaged).
 # Slim: the multi-hundred-MB seclists/wordlists packages are omitted. Content
 # discovery uses a bundled common-path list (active_scan.BUILTIN_WORDLIST); for a
 # full wordlist on a real engagement run `sudo apt-get install -y seclists` in-container.
+
+# --- testssl.sh (TLS audit) + vulners.nse (nmap CVE correlation) -------------
+RUN git clone --depth 1 https://github.com/drwetter/testssl.sh.git /opt/testssl \
+ && ln -s /opt/testssl/testssl.sh /usr/local/bin/testssl.sh \
+ && curl -fsSL -o /usr/share/nmap/scripts/vulners.nse \
+      https://raw.githubusercontent.com/vulnersCom/nmap-vulners/master/vulners.nse \
+ && nmap --script-updatedb 2>/dev/null || true
 
 # Point agent-browser at the system chromium (no per-user Chrome download needed).
 ENV AGENT_BROWSER_EXECUTABLE_PATH=/usr/bin/chromium
@@ -46,11 +58,20 @@ RUN /opt/venv/bin/pip install --no-cache-dir --upgrade pip \
  && /opt/venv/bin/pip install --no-cache-dir -e /opt/syber-platform \
  && /opt/venv/bin/pip install --no-cache-dir mcp neo4j "psycopg[binary]" confluent-kafka pyyaml \
  && /opt/venv/bin/pip install --no-cache-dir agentmail \
+ && /opt/venv/bin/pip install --no-cache-dir git-dumper arjun \
+ && ln -sf /opt/venv/bin/git-dumper /usr/local/bin/git-dumper \
+ && ln -sf /opt/venv/bin/arjun /usr/local/bin/arjun \
  && chown -R syber:syber /opt/venv
 
 # --- Baked project workspace (project-level .claude/ + .mcp.json) ------------
 RUN cp -r /opt/syber-platform/infra/kali/workspace /home/syber/workspace \
  && chown -R syber:syber /home/syber/workspace
+
+# --- Durable engagement state (fleet checkpoint, etc.) -----------------------
+# Pre-create + chown the state dir so a named volume mounted here (compose) is
+# owned by the non-root 'syber' user and the fleet checkpoint persists across runs.
+RUN mkdir -p /opt/syber-platform/.investigation_state \
+ && chown -R syber:syber /opt/syber-platform/.investigation_state
 
 USER syber
 WORKDIR /home/syber/workspace
