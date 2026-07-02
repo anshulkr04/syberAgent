@@ -18,8 +18,16 @@
 # as an operator CONTEXT file (markdown/text) whose contents are fed to the agent as
 # trusted, priority instructions for this engagement; any other arg is the attestation.
 #
-# Env: SYBER_MAX_PASSES (default 6), SYBER_FLEET_CONCURRENCY (default 6),
-#      SYBER_KEEP_DATA=1 (keep backends+data on exit).
+# RALPH LOOP: this re-runs the agent (fresh context each pass) until an OBJECTIVE coverage
+# check — computed from the attack graph, not the agent's word — reports every discovered
+# subdomain/host/endpoint/API probed and every high-value lead verified-or-exhausted. The
+# agent saying "ENGAGEMENT_COMPLETE" is NOT trusted on its own; `syber.fleet.coverage_cli`
+# is the backpressure that actually stops the loop (Ralph: completion = validation signal).
+#
+# Env: SYBER_MAX_PASSES (default 40 — a safety cap, not the normal stop), SYBER_FLEET_CONCURRENCY
+#      (default 6), SYBER_KEEP_DATA=1 (keep backends+data on exit),
+#      SYBER_RALPH_STRICT=1 (default: stop ONLY on the objective coverage check; set 0 to also
+#      accept the agent's ENGAGEMENT_COMPLETE as a fallback stop).
 set -uo pipefail
 cd "$(dirname "$0")/.."
 
@@ -30,7 +38,8 @@ for arg in "${@:2}"; do
   if [ -f "$arg" ]; then CONTEXT_FILE="$arg"; else ATTEST="$arg"; fi
 done
 ATTEST="I own and am authorised to test this target"
-MAX_PASSES="${SYBER_MAX_PASSES:-6}"
+MAX_PASSES="${SYBER_MAX_PASSES:-40}"
+RALPH_STRICT="${SYBER_RALPH_STRICT:-1}"
 CONCURRENCY="${SYBER_FLEET_CONCURRENCY:-6}"
 COMPOSE="docker compose -f infra/docker-compose.kali.yml"
 
@@ -140,20 +149,37 @@ STEP 6 — For each VERIFIED issue: syber_publish_finding (attack_chain + per-st
    the rung you have EVIDENCE for) then syber_gate_finding. Only CONFIRMED verdicts ship — a reflected
    payload is not execution; a claimed secret/token must appear in real tool output.
 
-STEP 7 — CAPTURE PROOF, then EMAIL THE REPORT. For each confirmed finding, capture concrete proof: an
-   agent-browser screenshot of the exposed page/console/Swagger, and the downloaded data sample from
-   syber_verify_data_exposure (saved automatically under .investigation_state/evidence/). Then call
-   syber_send_report target=${TARGET} attachments=[<paths to the screenshots you saved>] — it emails the
-   operator the full report with every proof attached (data samples auto-included) so they can verify
-   each finding is real and forward it to the org. Reporting is the last step; do it before finishing.
+STEP 7 — CONFIRM WITH A REAL REQUEST, then EMAIL THE REPORT. A finding is only real if a single crafted
+   request PROVES it. For each candidate, run syber_verify_data_exposure <url> (GET/POST with the right
+   headers) — a hit records a CONFIRMED capture (2xx + real data) under .investigation_state/evidence/, from
+   which the report auto-generates a curl reproduction + an attached verify.sh the operator can run. A
+   401/403/blocked/"Access Denied"/empty response is NOT a finding — do NOT screenshot it and call it proof;
+   either send the correct payload/headers/auth to actually reach the data, or drop it. Screenshots are
+   SUPPORTING context only, never the proof; the proof is the reproducible HTTP capture. Then call
+   syber_send_report target=${TARGET} attachments=[<optional screenshot paths of CONFIRMED exposures>] — it
+   emails the operator the report with curl repro commands + verify.sh + data samples attached. Reporting is
+   the last step; do it before finishing.
+
+This runs as a RALPH LOOP: after you stop, an OBJECTIVE coverage check (syber_coverage_status, computed from
+the attack graph — NOT your say-so) decides whether the engagement is really done. If ANY discovered surface
+is untested it re-invokes you to keep going. So do not try to "finish" — instead DRIVE COVERAGE TO ZERO:
+  - Call syber_coverage_status. It returns `remaining` — the exact untested assets (subdomains not enumerated,
+    hosts not scanned, web hosts not crawled, parametered endpoints/APIs not probed, high-value leads not
+    verified). WORK THOSE ITEMS. Re-call it as you go; keep going until remaining_count = 0.
+  - Probe EVERY discovered endpoint — including every URL seen in the browser network tab (API/XHR calls) and
+    every subdomain. syber_recon_site / syber_crawl ingest network-tab URLs automatically; test each.
 
 DO NOT CONCLUDE until ALL of these are true (persistence is mandatory — err toward digging longer):
+  - syber_coverage_status returns complete=true (remaining_count = 0) — the objective stop signal;
   - syber_enumerate_subdomains has run and EVERY non-prod host it found has been scanned + crawled + had
     its JS analysed + been checked for an exposed API spec;
   - syber_leads_status shows NO open high-value lead (each is VERIFIED or genuinely EXHAUSTED with logged
     attempts);
+  - every published finding has a CONFIRMED reproduction (syber_verify_data_exposure returned 2xx + real
+    data → a curl the operator can re-run). A finding with only an inaccessible/403 capture is NOT confirmed
+    — keep working it (correct payload/headers/auth) or drop it; do not ship unconfirmed findings;
   - findings are published AND gated;
-  - the report has been emailed via syber_send_report (with proof screenshots + data samples attached).
+  - the report has been emailed via syber_send_report (curl repro + verify.sh + data samples attached).
 A WAF block, "the SPA hid the routes", or "prod looks hardened" are NOT acceptable stopping points — they
 mean pivot (non-prod / origin / JS-named APIs), not stop. "No critical findings" is only valid AFTER the
 full methodology above is exhausted across ALL discovered subdomains — never on the prod surface alone.
@@ -177,28 +203,49 @@ syber_send_report target=${TARGET} attachments=[<screenshot paths>] to email the
 report with proofs. Then print ENGAGEMENT_COMPLETE: <summary> (and CRITICAL_CONFIRMED if a critical was
 gated).${CONTEXT_BLOCK}"
 
+# Objective backpressure: query the shared graph in a throwaway container. Exit 0 == the
+# whole discovered surface is probed and every high-value lead resolved (the real stop).
+coverage_complete() {
+  $COMPOSE run --rm -T kali python -m syber.fleet.coverage_cli --quiet </dev/null 2>/dev/null
+}
+
 MSG="$SEED"
 pass=1
+done_reason=""
 while [ "$pass" -le "$MAX_PASSES" ]; do
   echo "=================================================================="
-  echo "[syber] fleet pass ${pass}/${MAX_PASSES} against ${TARGET}"
+  echo "[syber] RALPH pass ${pass}/${MAX_PASSES} against ${TARGET}"
   echo "=================================================================="
   LOG="$(mktemp -t syber-fleet.XXXXXX)"
   $COMPOSE run --rm -T -e SYBER_WIPE_ON_EXIT=0 kali \
     claude -p "$MSG" --verbose --output-format stream-json \
     < /dev/null 2>&1 | python3 scripts/_stream_filter.py | tee "$LOG"
-
-  if grep -q "ENGAGEMENT_COMPLETE" "$LOG"; then
-    echo "[syber] fleet reported coverage complete."
-    grep -q "CRITICAL_CONFIRMED" "$LOG" && echo "[syber] ** a CRITICAL finding was confirmed. **"
-    rm -f "$LOG"; break
-  fi
-  echo "[syber] fleet stopped before completing coverage — resuming."
+  grep -q "CRITICAL_CONFIRMED" "$LOG" && echo "[syber] ** a CRITICAL finding was confirmed. **"
+  agent_said_done=1; grep -q "ENGAGEMENT_COMPLETE" "$LOG" || agent_said_done=0
   rm -f "$LOG"
+
+  # THE stop signal: objective coverage from graph state (not the agent's claim).
+  echo "[syber] checking objective coverage (graph-derived backpressure)…"
+  if coverage_complete; then
+    done_reason="coverage: all discovered surface probed and all high-value leads resolved"
+    break
+  fi
+  if [ "$RALPH_STRICT" != "1" ] && [ "$agent_said_done" = "1" ]; then
+    done_reason="agent ENGAGEMENT_COMPLETE (non-strict mode; coverage not yet 100%)"
+    break
+  fi
+  if [ "$agent_said_done" = "1" ]; then
+    echo "[syber] agent claimed ENGAGEMENT_COMPLETE but coverage shows untested surface — CONTINUING (Ralph: don't trust self-report)."
+  else
+    echo "[syber] surface still has untested assets — resuming."
+  fi
   MSG="$CONTINUE"
   pass=$((pass + 1))
 done
 
-[ "$pass" -gt "$MAX_PASSES" ] && \
-  echo "[syber] reached max passes (${MAX_PASSES}); stopping. Raise SYBER_MAX_PASSES to allow more."
+if [ -n "$done_reason" ]; then
+  echo "[syber] RALPH loop complete — ${done_reason}."
+else
+  echo "[syber] reached max passes (${MAX_PASSES}) with coverage still incomplete. Raise SYBER_MAX_PASSES to allow more, or inspect syber_coverage_status."
+fi
 echo "[syber] fleet engagement finished."

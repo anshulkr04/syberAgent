@@ -97,6 +97,20 @@ def upsert_web_endpoint(host: str, url: str, status: int | None = None, title: s
     return url
 
 
+def mark_endpoint_probed(url: str) -> None:
+    """Mark a WebEndpoint as probed (injection/access-control run) so coverage converges."""
+    g = get_graph()
+    if g.has(url):
+        g.add_node(url, "WebEndpoint", probed=True)
+
+
+def mark_vuln_verified(vid: str, verified: bool = True) -> None:
+    """Mark a Vulnerability as verified/exhausted so coverage stops re-listing it."""
+    g = get_graph()
+    if g.has(vid):
+        g.add_node(vid, "Vulnerability", verified=verified)
+
+
 def upsert_vulnerability(target: str, vid: str, name: str | None = None, severity: str = "unknown",
                          cvss: float | None = None, source: str = "nuclei",
                          service_id: str | None = None) -> str:

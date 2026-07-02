@@ -34,7 +34,7 @@ from hashlib import blake2b
 from pathlib import Path
 from typing import Any
 
-__all__ = ["DataEvidence", "scan_sensitive", "redact", "save_sample", "luhn_valid"]
+__all__ = ["DataEvidence", "scan_sensitive", "redact", "save_sample", "luhn_valid", "is_confirmed"]
 
 # Bodies larger than this are not scanned in full (head sample) — keeps it cheap.
 _SCAN_CAP = 200_000
@@ -207,24 +207,51 @@ def scan_sensitive(body: str | None, content_type: str = "") -> DataEvidence:
     return ev
 
 
+def is_confirmed(status: int | None, evidence: DataEvidence) -> bool:
+    """A capture CONFIRMS an exposure only when the endpoint actually served data: a
+    2xx status AND real/structured content. A 401/403/blocked/challenge/empty page is
+    NOT proof of anything — it is an inaccessible attempt, never presented as a finding."""
+    try:
+        ok = status is not None and 200 <= int(status) < 300
+    except (TypeError, ValueError):
+        ok = False
+    return ok and evidence.verdict in ("REAL_DATA", "STRUCTURED")
+
+
 def save_sample(url: str, status: int | None, body: str | None, evidence: DataEvidence,
-                root: Path | None = None) -> str:
+                root: Path | None = None, *, method: str = "GET",
+                request_headers: dict[str, str] | None = None,
+                response_headers: dict[str, str] | None = None,
+                transport: str = "", screenshot: str | None = None) -> str:
     """Persist a *downloaded* sample for operator review: a capped raw body plus a
-    redacted JSON summary. Returns the evidence directory path (best-effort — on any
-    IO error returns ""). The raw body is operator-only on disk; callers surface only
-    the redacted summary."""
+    redacted JSON summary that also records the EXACT request (method/url/headers) so a
+    faithful curl reproduction can be generated, and a ``confirmed`` flag (2xx + real
+    data) so inaccessible attempts are never mistaken for proof. Returns the evidence
+    base path (best-effort — "" on IO error). Raw body is operator-only on disk."""
     try:
         if root is None:
             from ..config import config
             root = config.state / "evidence"
         host = re.sub(r"[^A-Za-z0-9._-]", "_", url.split("://")[-1].split("/")[0]) or "target"
-        digest = blake2b(url.encode(), digest_size=6).hexdigest()
+        digest = blake2b(f"{method} {url}".encode(), digest_size=6).hexdigest()
         d = Path(root) / host
         d.mkdir(parents=True, exist_ok=True)
         stamp = time.strftime("%Y%m%dT%H%M%S")
         base = d / f"{stamp}-{digest}"
         (base.with_suffix(".body")).write_text((body or "")[:_SAVE_CAP], encoding="utf-8", errors="replace")
-        summary = {"url": url, "status": status, "saved_at": stamp, **evidence.to_dict()}
+        # Store the REAL request headers so the operator can reproduce exactly. The report
+        # is operator-locked (SYBER_REPORT_TO), and a faithful PoC needs the working
+        # request verbatim — including any auth/token the agent used to reach the data.
+        summary = {
+            "url": url, "method": method.upper(), "status": status, "saved_at": stamp,
+            "transport": transport,
+            "request_headers": dict(request_headers or {}),
+            "response_content_type": (response_headers or {}).get("content-type", ""),
+            "response_server": (response_headers or {}).get("server", ""),
+            "confirmed": is_confirmed(status, evidence),
+            "screenshot": screenshot or "",
+            **evidence.to_dict(),
+        }
         (base.with_suffix(".json")).write_text(json.dumps(summary, indent=2), encoding="utf-8")
         return str(base)
     except Exception:  # noqa: BLE001 - evidence-saving must never break a probe

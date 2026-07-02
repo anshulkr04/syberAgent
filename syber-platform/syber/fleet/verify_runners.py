@@ -383,9 +383,11 @@ def run_data_extraction(task: Task, board: Board, wid: str) -> WorkerResult:
         return WorkerResult(status="failed", note=f"fetch failed: {e}")
     status = resp.get("status")
     body = resp.get("body", "")
-    ctype = (resp.get("headers", {}) or {}).get("content-type", "")
+    resp_headers = resp.get("headers", {}) or {}
+    ctype = resp_headers.get("content-type", "")
     ev = scan_sensitive(body, ctype)
-    artefact = save_sample(url, status, body, ev)
+    artefact = save_sample(url, status, body, ev, method="GET",
+                           response_headers=resp_headers, transport=resp.get("transport", ""))
 
     if ev.has_sensitive:
         _ingest_vuln(url, "data-exposure", name=f"unauthenticated sensitive data exposure ({url})",

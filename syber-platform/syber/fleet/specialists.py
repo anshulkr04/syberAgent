@@ -253,12 +253,21 @@ def _run_web_crawl(task: Task, board: Board, wid: str) -> WorkerResult:
                         note=f"endpoints={r.get('endpoint_count', 0)}", steps=1)
 
 
+def _mark_probed(url: str) -> None:
+    try:
+        from ..graph import model
+        model.mark_endpoint_probed(url)
+    except Exception:  # noqa: BLE001 - marker is best-effort (coverage convergence)
+        pass
+
+
 def _run_test_injection(task: Task, board: Board, wid: str) -> WorkerResult:
     from ..scanning import webapp
     try:
         r = webapp.test_injection(task.target_id)
     except Exception as e:  # noqa: BLE001
         return WorkerResult(status="failed", note=str(e))
+    _mark_probed(task.target_id)
     n = len(r.get("findings", []))
     return WorkerResult(status="done", result_ref=f"test_injection:{task.target_id}",
                         note=f"verdict={r.get('verdict')} findings={n}", steps=1)
@@ -270,6 +279,7 @@ def _run_test_access_control(task: Task, board: Board, wid: str) -> WorkerResult
         r = webapp.test_access_control(task.target_id)
     except Exception as e:  # noqa: BLE001
         return WorkerResult(status="failed", note=str(e))
+    _mark_probed(task.target_id)
     n = len(r.get("findings", []))
     return WorkerResult(status="done", result_ref=f"test_access_control:{task.target_id}",
                         note=f"verdict={r.get('verdict')} findings={n}", steps=1)

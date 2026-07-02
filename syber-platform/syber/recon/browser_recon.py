@@ -53,6 +53,24 @@ def browser_available() -> bool:
     return shutil.which(AB) is not None
 
 
+def capture_screenshot(url: str, out_path: str, *, wait_ms: int = 2500) -> str | None:
+    """Open `url` in real Chrome and screenshot it to `out_path`. Returns the path on
+    success, else None. Used to snapshot a CONFIRMED exposure at the moment of proof, so
+    the attached image shows the actual exposed page/data — not a stale/403 page."""
+    if not browser_available():
+        return None
+    sess = f"proof-{uuid.uuid4().hex[:8]}"
+    try:
+        os.makedirs(os.path.dirname(out_path) or ".", exist_ok=True)
+        _ab(["--session", sess, "open", url], timeout=60)
+        _ab(["--session", sess, "wait", str(wait_ms)])
+        _ab(["--session", sess, "screenshot", out_path])
+        _ab(["--session", sess, "close", "--all"])
+        return out_path if os.path.exists(out_path) else None
+    except Exception:  # noqa: BLE001 - proof capture must never break the probe
+        return None
+
+
 def _ab(args: list[str], timeout: int = 45) -> tuple[int, str, str]:
     try:
         p = subprocess.run([AB, *args], capture_output=True, text=True, timeout=timeout)
@@ -99,6 +117,46 @@ def _parse_har(path: str) -> dict[str, Any]:
         "request_user_agent": req_headers.get("user-agent"),
         "url": doc.get("request", {}).get("url"),
     }
+
+
+def _har_network_urls(path: str, host: str) -> list[dict[str, Any]]:
+    """Harvest EVERY request the page made (the browser 'network tab') — XHR/fetch/API
+    calls, not just the main document. These same-site URLs are the real API surface and
+    must be ingested so they get probed. Returns [{url, method, status, params}]."""
+    try:
+        har = json.load(open(path))
+    except (json.JSONDecodeError, FileNotFoundError, OSError):
+        return []
+    from urllib.parse import urlparse, parse_qsl
+    apex = host.split(":")[0]
+    out: dict[str, dict[str, Any]] = {}
+    for e in har.get("log", {}).get("entries", []):
+        req = e.get("request", {})
+        url = req.get("url", "")
+        if not url:
+            continue
+        netloc = urlparse(url).netloc.split(":")[0]
+        # same registrable domain only (don't ingest third-party analytics/CDNs)
+        if not (netloc == apex or netloc.endswith("." + _apex(apex))):
+            continue
+        key = url.split("#")[0]
+        params = sorted({k for k, _ in parse_qsl(urlparse(url).query)})
+        prev = out.get(key)
+        if prev:
+            prev["params"] = sorted(set(prev["params"]) | set(params))
+        else:
+            out[key] = {"url": key, "method": req.get("method", "GET"),
+                        "status": e.get("response", {}).get("status"), "params": params}
+    return list(out.values())
+
+
+def _apex(host: str) -> str:
+    try:
+        from ..scanning.subdomains import registrable_apex
+        return registrable_apex(host)
+    except Exception:  # noqa: BLE001
+        parts = host.split(".")
+        return ".".join(parts[-2:]) if len(parts) >= 2 else host
 
 
 def recon_site(site: str, screenshot_dir: str | None = None) -> dict[str, Any]:
@@ -157,6 +215,8 @@ def recon_site(site: str, screenshot_dir: str | None = None) -> dict[str, Any]:
         "request_user_agent": har.get("request_user_agent"),
         "screenshot": shot_path if os.path.exists(shot_path) else None,
     }
+    # The network tab: every same-site API/XHR/fetch the page fired — the real API surface.
+    report["network_endpoints"] = _har_network_urls(har_path, host)
     report["risk_indicators"] = _risk_indicators(report)
     try:
         os.remove(har_path)
@@ -178,6 +238,20 @@ def ingest_recon_to_graph(report: dict[str, Any]) -> dict[str, Any]:
     if http.get("status") is not None:
         model.upsert_web_endpoint(host, report.get("url"), status=http.get("status"),
                                   title=http.get("title"))
+    # Ingest every network-tab (API/XHR) URL as a WebEndpoint so coverage tracks it and
+    # the probes test it — this is how "all URLs on the network tab" get covered.
+    from urllib.parse import urlparse as _up
+    for ne in report.get("network_endpoints", []):
+        try:
+            u = ne.get("url")
+            if not u:
+                continue
+            ne_host = _up(u).netloc.split(":")[0] or host
+            model.upsert_host(ne_host, source="network_tab")
+            model.upsert_web_endpoint(ne_host, u, status=ne.get("status"),
+                                      method=ne.get("method", "GET"), params=ne.get("params", []))
+        except Exception:  # noqa: BLE001
+            continue
     for t in http.get("technology", []):
         # "server: cloudflare" / "x-powered-by: PHP/8.1" -> the VALUE is the tech;
         # bare signals ("react", "wordpress") are the tech name themselves.

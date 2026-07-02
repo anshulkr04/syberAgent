@@ -222,6 +222,8 @@ after any compaction.
   **waf_request / waf_session_status / waf_fallback** (Cloudflare traversal + origin-pivot when blocked),
   **fleet_run** (persistent PARALLEL engagement — fan out across vectors, pool into the graph, re-divide;
   bounded+resumable: call again while `resumable`), **fleet_status / fleet_plan_wave** (read-only progress),
+  **coverage_status** (THE objective 'are we done?' — graph-derived `remaining` untested surface; drive it to
+  zero, never conclude while remaining_count > 0),
   **leads_status / verify_lead** (the evidence ladder — open high-value leads you must VERIFY before
   concluding; verify_lead injects the matching CVE descriptions + PoC pointers),
   **verify_data_exposure** (PULL a sample from an unauthenticated endpoint and confirm it returns REAL

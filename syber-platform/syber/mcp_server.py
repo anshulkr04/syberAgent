@@ -373,13 +373,30 @@ def _verify_data_exposure(url: str, method: str = "GET",
                           cookies: str | None = None) -> dict[str, Any]:
     """Fetch an AUTHORISED endpoint and classify whether it returns REAL sensitive
     data. Raises NotAuthorized (handled by _scan) if the target isn't authorised."""
-    from syber.scanning.exfil import scan_sensitive, save_sample
+    from syber.scanning.exfil import scan_sensitive, save_sample, is_confirmed as exfil_is_confirmed
     resp = webapp.http_request(url, method=method, headers=headers, cookies=cookies, timeout=30)
     status = resp.get("status")
     body = resp.get("body", "")
-    ctype = (resp.get("headers", {}) or {}).get("content-type", "")
+    resp_headers = resp.get("headers", {}) or {}
+    ctype = resp_headers.get("content-type", "")
     ev = scan_sensitive(body, ctype)
-    artefact = save_sample(url, status, body, ev)
+    # Capture a proof SCREENSHOT only on a CONFIRMED exposure (2xx + real data) — so the
+    # attached image shows the actual exposed page/data, never a 403/inaccessible page.
+    shot = None
+    if exfil_is_confirmed(status, ev):
+        try:
+            from syber.recon.browser_recon import capture_screenshot
+            from syber.config import PATHS
+            import re as _re, time as _t
+            host = _re.sub(r"[^A-Za-z0-9._-]", "_", url.split("://")[-1].split("/")[0]) or "target"
+            shot_dir = PATHS.state / "evidence" / host
+            shot_path = str(shot_dir / f"{_t.strftime('%Y%m%dT%H%M%S')}-proof.png")
+            shot = capture_screenshot(url, shot_path)
+        except Exception:  # noqa: BLE001
+            shot = None
+    artefact = save_sample(url, status, body, ev, method=method,
+                           request_headers=headers or {}, response_headers=resp_headers,
+                           transport=resp.get("transport", ""), screenshot=shot)
     rung = {"REAL_DATA": 4, "STRUCTURED": 3}.get(ev.verdict, 2 if status and 200 <= int(status) < 300 else 0)
     return {
         "url": url, "status": status, "transport": resp.get("transport"),
@@ -853,6 +870,25 @@ def syber_fleet_status() -> dict[str, Any]:
     board, _ = _fleet()
     return {"coverage": board.coverage(),
             "open_tasks": [t.to_dict() for t in board.open_tasks()][:60]}
+
+
+@mcp.tool()
+def syber_coverage_status() -> dict[str, Any]:
+    """THE objective 'are we done?' signal — computed from the attack graph + lead
+    registry, NOT from anyone's say-so. Returns {complete, remaining, remaining_count,
+    stats}: `remaining` lists exactly what surface is still untested (subdomains not
+    enumerated, hosts not scanned, web hosts not crawled, parametered endpoints not
+    probed, high-value leads not verified/exhausted). The engagement is finished ONLY
+    when complete=true. Use it as the loop condition: while not complete, keep working the
+    `remaining` items. Never conclude while remaining_count > 0."""
+    from syber.fleet.coverage import engagement_coverage
+    board, _ = _fleet()
+    try:
+        from syber.graph.store import get_graph
+        graph = get_graph()
+    except Exception:  # noqa: BLE001
+        graph = None
+    return engagement_coverage(graph=graph, leads=getattr(board, "leads", None))
 
 
 @mcp.tool()

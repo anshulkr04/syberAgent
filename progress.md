@@ -1012,6 +1012,33 @@ can verify findings are real and forward to the target org. Built:
   all pass. All new files compile; both .mcp.json valid; script lints. **REBUILD REQUIRED** (new modules +
   MCP tool): `docker compose -f infra/docker-compose.kali.yml build kali`.
 
+**FULLY-RUNNABLE REPRO + SCREENSHOT-ON-CONFIRM (2026-07-02):** user: the `<YOUR_AUTHORIZATION_HERE>`
+placeholder made the curl unusable, and screenshots showed inaccessible pages. Since the report is
+operator-locked (SYBER_REPORT_TO), the PoC must be paste-and-run: `save_sample` now stores the REAL request
+headers (no redaction) so `curl_for` emits the exact working request; `is_unauthenticated()` flags the
+strongest case (no creds → curl runs as-is) and the report/verify.sh label each finding UNAUTHENTICATED vs
+"headers included". Screenshots are now captured AT CONFIRMATION: `browser_recon.capture_screenshot(url,path)`
++ `_verify_data_exposure` screenshots ONLY when `is_confirmed` (2xx+real data) into the evidence dir, recorded
+as `screenshot` on the evidence JSON and referenced in the report — so the attached image shows the actual
+exposed data, never a 403 page. 246 pass; tests updated (real-header curl, is_unauthenticated).
+
+**REPRODUCTION SCRIPTS + PROOF-QUALITY GATE (2026-07-02):** user: agent stops early, ships unconfirmed
+findings, and its "proof" screenshots showed inaccessible/403 pages (not vulns) or the browser didn't send
+the payload. Fixes:
+- `exfil.save_sample` now records the EXACT request (method/url/redacted-headers/transport) + response
+  content-type/server + a `confirmed` flag (`is_confirmed()` = 2xx AND REAL_DATA/STRUCTURED). A 401/403/
+  blocked/empty capture is `confirmed:false` and can never be presented as a finding.
+- New `syber/repro.py`: `curl_for()` builds a faithful copy-pasteable curl from a saved capture (redacted
+  auth shown as `<YOUR_..._HERE>`, never faked), `expected_result()`, `reproductions()` splits evidence into
+  confirmed vs inaccessible, `build_verify_script()` emits a runnable verify.sh of ONLY confirmed findings.
+- `reporting`: report gained a "How to verify (reproduction)" section (curl per confirmed finding) + an
+  "Attempts that did NOT confirm (not findings)" list (403s shown honestly, not as vulns); attaches
+  **verify.sh**; headline now counts "Reproducible (2xx + real data)". Screenshots are supporting-only.
+- Doctrine (syber_fleet.sh STEP 7 + don't-conclude gate): a finding is real ONLY with a CONFIRMED capture
+  (syber_verify_data_exposure → 2xx + real data → curl repro); a 403/inaccessible page is NOT proof — send
+  the correct payload/headers/auth or drop it; don't ship unconfirmed findings. 245 pass (8 known auth
+  fails). New tests: `test_repro.py` + is_confirmed cases.
+
 **RECIPIENT LOCKED TO OPERATOR (2026-07-02):** a run emailed the report to `operator@syber.ai` (a model-
 invented address) instead of `.env`'s SYBER_REPORT_TO — because the MCP tool exposed a `to` param and
 `build_and_send` did `to or env(...)`, so an agent-supplied `to` OVERRODE the env. Since the report carries
@@ -1106,6 +1133,33 @@ the user's "thorough" choice. The coordinator per-future-deadline fix (offered, 
 right way to bound a genuinely-hung worker independent of these depth budgets.
 
 ---
+
+### 24. RALPH LOOP — probe until objective coverage = 0 (2026-07-02)
+User: loop should run until ALL vulns found — probe every discovered endpoint, subdomain, and network-tab
+API. Researched the Ralph technique (ghuntley.com/ralph; Anthropic ralph-wiggum plugin): a loop that re-runs
+the agent on fresh context until done, where **completion = an external validation/backpressure signal, NOT
+the model's self-report** (models lie "done" to escape). Our bug was exactly that — `syber_fleet.sh` stopped
+when the model printed ENGAGEMENT_COMPLETE. Fix = make the stop OBJECTIVE, computed from the attack graph.
+- **`syber/fleet/coverage.py`** `engagement_coverage(graph, leads)` → `{complete, remaining[], remaining_count}`
+  from durable state: apex not enumerated / host not service-scanned / web host not crawled / parametered
+  WebEndpoint not `probed` / open high-value lead. Converges (lead registry owns VERIFIED/EXHAUSTED lifecycle;
+  probes mark endpoints `probed`). Pure, 8 tests.
+- **`syber/fleet/coverage_cli.py`** (`python -m syber.fleet.coverage_cli --quiet`, exit 0=complete) — the
+  loop's INDEPENDENT backpressure, queries the same Neo4j the agent populated.
+- **MCP `syber_coverage_status`** — same signal for the in-agent loop; returns the exact `remaining` untested
+  assets to work. Registered in CLAUDE.md.
+- **Convergence markers:** `graph/model.mark_endpoint_probed`/`mark_vuln_verified`; injection + access-control
+  runners mark endpoints `probed`.
+- **Network-tab ingestion (the "probe every URL on the network tab" ask):** `browser_recon._har_network_urls`
+  harvests EVERY same-site XHR/fetch/API URL from the HAR (was discarding all but the main doc); `recon_site`
+  returns `network_endpoints` and `ingest_recon_to_graph` upserts each as a WebEndpoint → coverage tracks them
+  → they get probed.
+- **`syber_fleet.sh` = true Ralph loop:** MAX_PASSES 6→40 (safety cap, not the stop); after each pass runs
+  `coverage_cli` in a throwaway container — stops ONLY when coverage=complete (SYBER_RALPH_STRICT=1 default;
+  =0 accepts agent ENGAGEMENT_COMPLETE as fallback). If the agent claims done but coverage shows untested
+  surface, it CONTINUES. SEED/CONTINUE tell the agent to drive syber_coverage_status `remaining` to zero.
+254 pass (8 known auth-revert fails). REBUILD required (new modules + MCP tool). Security caveats honoured:
+scope allowlist + injection guard + rate limiting already in path; MAX_PASSES + teardown are the safety nets.
 
 *Bottom line: the platform is built, the Kali image is rebuilt, and every layer is verified
 in-container — there is no outstanding build/setup step. §7 (severity/persistence/startup) done;
