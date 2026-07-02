@@ -989,6 +989,106 @@ full suite **233 passed** (only the 2 intentionally-reverted stub tests fail —
 unrelated). `syber_fleet.sh` lints; all changed files compile. **REBUILD REQUIRED** (new module + MCP tool +
 fleet rule): `docker compose -f infra/docker-compose.kali.yml build kali`.
 
+### 20. Emailed verifiable reports (Resend) (2026-07-02)
+User added `RESEND_API_KEY` and wants the agent to email an engagement report with PROOFS attached, so they
+can verify findings are real and forward to the target org. Built:
+- **`syber/integrations/resend.py`** — Resend REST client via the shared `http_json` helper (Bearer
+  `RESEND_API_KEY`, POST /emails, base64 attachments). `configured()`; actionable error on missing key.
+  Default sender `onboarding@resend.dev` (Resend sandbox — only delivers to the account owner's email;
+  set `SYBER_REPORT_FROM` to a verified-domain sender to email anyone).
+- **`syber/reporting.py`** — `build_and_send(to, target, extra_attachments, subject)`: gathers published
+  findings from the in-process findings sink, auto-collects PROOF files from `.investigation_state/evidence/`
+  (the data-exposure samples) + any explicit screenshot paths, base64s them (deduped, ext-filtered, capped
+  25 files / 15 MB), renders an HTML+text report (severity-sorted findings table + attack chains + evidence
+  refs + proof list), emails via Resend. Recipient = `to` or `SYBER_REPORT_TO`.
+- **MCP tool `syber_send_report(to, target, attachments, subject)`** (via `_integration`). Doctrine: new
+  STEP 7 in `syber_fleet.sh` SEED + CONTINUE (capture screenshots → send_report as the FINAL step, added to
+  the don't-conclude gate) and a Reporting entry in workspace `CLAUDE.md`.
+- **Wiring:** `RESEND_API_KEY` + `SYBER_REPORT_TO` + `SYBER_REPORT_FROM` added to BOTH `.mcp.json` env
+  blocks (workspace + plugin) and documented in `.env.example`. Flows .env → compose env_file → container →
+  .mcp.json → MCP server.
+- **Verified (host venv, 2026-07-02):** 8 new tests (`tests/integration/test_reporting.py` — client request
+  shape, attachment collect/dedupe/cap/b64, render ordering+escaping, build_and_send, recipient-required),
+  all pass. All new files compile; both .mcp.json valid; script lints. **REBUILD REQUIRED** (new modules +
+  MCP tool): `docker compose -f infra/docker-compose.kali.yml build kali`.
+
+**⚠ AUTH REGRESSION (needs a decision):** `authorization.py::is_authorized` is currently
+`return True, f"...{self._auths[target].kind}"` (always-allow) — this defeats default-deny AND KeyErrors for
+any target not already in `_auths` (crashes the tool instead of a clean refusal). It fails 8 tests
+(webapp auth-gating ×4, subdomain auth-scoping ×2, expand_scope, destructive-floor). Flagged to the user;
+left unchanged pending their call (clean always-allow vs restore default-deny + the apex→subdomain scoping).
+
+### 21. full_scan timeout right-sizing — stop ~45-min tool calls (2026-07-02)
+User hit `syber_full_scan` "stuck" 5+ min (on a WAF'd target, lalpathlabs.com). Root cause: `_env_timeout`
+made `SYBER_SCAN_TIMEOUT` (=900 in the container) OVERRIDE even explicitly-passed per-stage timeouts, so
+full_scan's 3 stages each ran to 900s ⇒ ~45 min, and a WAF'd target burns the full window for ~0 results.
+Fix (`active_scan.py`): new `_resolve_timeout` (explicit caller timeout WINS; env only fills a None default)
++ `_fullscan_budget` (a TOTAL wall-clock budget, `SYBER_FULLSCAN_BUDGET` default 600s, split 40/30/30 across
+service/content/vuln) — full_scan is now bounded ~10 min instead of 45. All stage fns switched to
+`_resolve_timeout`. Entrypoint defaults lowered: `SYBER_SCAN_TIMEOUT` 900→300 (standalone stage) +
+`SYBER_FULLSCAN_BUDGET=600`. Immediate no-rebuild lever: set `SYBER_SCAN_TIMEOUT` lower in .env (compose
+env_file passes it; entrypoint's `:-` keeps it). 4 new tests (`tests/integration/test_scan_timeouts.py`);
+**239 passed** (same 8 intentional auth-revert failures only). REBUILD to bake in. NOTE (still open, offered
+not yet done): the fleet coordinator blocks on `future.result()` with no per-future timeout — a single hung
+worker can still stall `syber_fleet_run` past its budget; that's the remaining defense-in-depth fix.
+
+### 22. Robust multi-source subdomain enumeration — kill the crt.sh SPOF (2026-07-02)
+crt.sh (the only real source in §19) constantly 502s/rate-limits → runs saw "crt.sh returned empty" and
+missed the non-prod cluster. Researched (3 agents: tooling, data sources, community/academic) and
+re-architected `syber/scanning/subdomains.py` into a multi-tier, no-single-point-of-failure enumerator
+(user chose: passive+validate default, brute opt-in; wire free OTX key):
+- **Tier 1** — shell out to **`subfinder`** (~30 passive sources) when installed (`run_subfinder`).
+- **Tier 2** — parallel **union of keyless passive sources** (`passive_union`): certspotter, crt.sh(retry),
+  hackertarget, urlscan, wayback CDX, + AlienVault OTX when `OTX_API_KEY` set. Each best-effort with a
+  browser UA + timeout; one source failing never zeroes coverage.
+- **prefix wordlist + base×env twin brute** (kept from §19).
+- **Resolve/validate**: **`dnsx`** when installed (fast, wildcard-aware) else stdlib socket (`resolve_hosts`).
+- Active DNS brute (puredns/massdns) deliberately NOT default (noisy) — belongs behind an opt-in flag later.
+Return dict gained `sources` (per-source hit counts); pure helpers (registrable_apex/classify_env/parse_crtsh/
+candidate_hosts/env_variants) unchanged (still tested).
+
+**Wiring:** Dockerfile apt-installs `subfinder dnsx amass massdns puredns`; `OTX_API_KEY` added to both
+.mcp.json env blocks + `.env.example`.
+
+**VALIDATED LIVE on nuvamawealth.com (2026-07-02, host):** with **crt.sh DOWN (0 hits) and no OTX key**, the
+enumerator returned **34 live subdomains / 14 non-prod — the entire money cluster**: vamauat, vamacug,
+nwmwuat, nwstuat, nmwuat1, onboardinguat, nwopmsuat, nwmwcug, nwopmscug, authuat, smallcasesuat, nwuat…
+(subfinder 19 + hackertarget 11 + urlscan 8 + wayback 15 unioned; env-variant brute + DNS caught the
+`nw*uat`/`*cug` family). The old crt.sh-only path found ZERO of these when crt.sh was down. Full suite
+**239 passed** (only the 8 intentional auth-revert failures). REBUILD to bake in the new tools.
+
+Research refs: subfinder/dnsx/amass/puredns/massdns (ProjectDiscovery/OWASP/d3mondev), n0kovo wordlist,
+trickest/resolvers, Hadrian Subwiz (nanoGPT subdomain prediction, +~10%), GAN-for-subdomains (ACM SAC 2022
+10.1145/3477314.3506967). Passive sources verified live: certspotter/hackertarget/urlscan work keyless;
+crt.sh flaky; OTX needs free key (429 unauth); wayback works in-container.
+
+### 23. Depth boosts — "probe more" (thorough profile, ~60min/target) (2026-07-02)
+User: agent "isn't probing enough". Root causes found in code: content-discovery used an 81-path builtin
+wordlist (seclists omitted from slim image) + only level-1 gobuster (feroxbuster installed but UNUSED);
+crawl capped at 40 pages/depth 2; nuclei ran a narrow default; inferred endpoints were returned but never
+INGESTED (so injection/IDOR never tested them); subdomain brute was off. User chose ALL boosts + Thorough
+(60min+). Applied:
+- **content_discovery** → prefers **feroxbuster RECURSIVE** (`SYBER_DISCOVERY_DEPTH=2`, `-C 404..`, JSON
+  parse) over gobuster; `_ensure_wordlist` now picks **raft-medium (~30k)** / dirbuster-medium / seclists
+  before the 81-path builtin (`SYBER_WORDLIST` override).
+- **crawl** defaults raised to **150 pages / depth 3** (`SYBER_CRAWL_PAGES`/`SYBER_CRAWL_DEPTH`); crawl now
+  **ingests inferred endpoints** as WebEndpoints → fleet injection/IDOR rules spawn tasks for them.
+- **nuclei** → rate-limit 150, `-c 40`, `-fr`, wide `-tags cve,exposure,misconfig,exposed-panels,
+  default-login,takeover,sqli,xss,lfi,rce,ssrf,auth-bypass…` (`SYBER_NUCLEI_FULL`).
+- **full_scan budget** 600→**1800s** (~30min), split 20/40/40 (service/content/vuln) so content+nuclei get
+  the bulk; `MCP_TOOL_TIMEOUT` 30→45min so the harness doesn't kill it mid-scan; `SYBER_SCAN_TIMEOUT` 300→600.
+- **Active subdomain brute** ON by default (`run_puredns_brute`, `SYBER_SUBDOMAIN_BRUTE=1`): puredns +
+  seclists DNS wordlist + trickest resolvers, wildcard-filtered; empty-safe if tools/lists absent.
+- **Dockerfile**: apt-install **seclists** (content + DNS wordlists) + fetch **trickest resolvers.txt** to
+  /opt/resolvers.txt. entrypoint exports all the thorough-profile env defaults (all overridable to go faster).
+Every knob is env-tunable, so "too slow" → lower SYBER_FULLSCAN_BUDGET / set SYBER_SUBDOMAIN_BRUTE=0 /
+SYBER_DISCOVERY_RECURSIVE=0. **239 passed** (only the 8 intentional auth-revert failures); updated my own
+timeout tests to the new 1800 default. REBUILD REQUIRED (Dockerfile + new tool usage).
+
+NOTE (tension acknowledged): §21 cut scan time to fix a 45-min hang; this §23 raises it again for depth per
+the user's "thorough" choice. The coordinator per-future-deadline fix (offered, not built) is still the
+right way to bound a genuinely-hung worker independent of these depth budgets.
+
 ---
 
 *Bottom line: the platform is built, the Kali image is rebuilt, and every layer is verified

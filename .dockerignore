@@ -1,0 +1,263 @@
+# flyctl launch added from .gitignore
+# ============================================================================
+# Syber Agent — root .gitignore
+# ============================================================================
+
+# --- Secrets (NEVER commit) -------------------------------------------------
+**/.env
+**/.env.*
+!**/.env.example
+**/*.pem
+**/*.key
+**/**/secrets
+
+# --- Python virtualenv & caches ---------------------------------------------
+**/.venv
+**/venv
+**/env
+**/__pycache__
+**/*.py[cod]
+**/*$py.class
+**/.pytest_cache
+**/.mypy_cache
+**/.ruff_cache
+**/*.egg-info
+**/build
+**/dist
+**/syber-platform/dist/            # packaged Kali image tarball (~1.5 GB)
+**/*.tar
+**/*.tar.gz
+
+# --- Node ------------------------------------------------------------------
+**/node_modules
+**/npm-debug.log*
+**/yarn-error.log*
+
+# --- Syber runtime state (regenerated at run time) --------------------------
+**/.audit_log
+**/.memory_store.sqlite
+**/.investigation_state
+**/.scan_authorization.json
+**/**/.audit_log
+**/**/.memory_store.sqlite
+**/**/.investigation_state
+**/**/.scan_authorization.json
+**/syber-platform/syber/scoring/calibration/*.joblib
+
+# --- Claude Code / local machine settings -----------------------------------
+**/.claude/settings.local.json
+**/**/.claude/settings.local.json
+**/.claude/projects
+**/CLAUDE.local.md
+
+# --- agent-browser (third-party tool clone + its browser/session data) ------
+**/agent-browser
+**/.agent-browser
+**/**/agent-browser-chrome-*
+**/*.session.json
+
+# --- OS / editor cruft ------------------------------------------------------
+**/.DS_Store
+**/.DS_Store?
+**/._*
+**/Thumbs.db
+**/*.swp
+**/*~
+**/.idea
+**/.vscode/*
+!**/.vscode/extensions.json
+
+# flyctl launch added from .venv/.gitignore
+# Created by venv; see https://docs.python.org/3/library/venv.html
+.venv/**/*
+
+# flyctl launch added from agent-browser/.gitignore
+# Dependencies
+agent-browser/**/node_modules
+
+# Build output
+agent-browser/**/dist
+
+# Native binaries (keep the launcher scripts)
+agent-browser/**/bin/agent-browser-*
+agent-browser/**/bin/.install-method
+!agent-browser/**/bin/agent-browser
+!agent-browser/**/bin/agent-browser.cmd
+
+# Rust build artifacts
+agent-browser/**/cli/target
+agent-browser/**/cli/*.o
+
+# Logs
+agent-browser/**/*.log
+agent-browser/**/npm-debug.log*
+
+# IDE
+agent-browser/**/.idea
+agent-browser/**/.vscode
+agent-browser/**/*.swp
+agent-browser/**/*.swo
+
+# OS
+agent-browser/**/.DS_Store
+agent-browser/**/Thumbs.db
+
+# Python
+agent-browser/**/__pycache__
+
+# Test artifacts
+agent-browser/**/*.png
+agent-browser/**/*.jpeg
+agent-browser/**/*.jpg
+agent-browser/**/*.webm
+agent-browser/**/test/e2e/.dogfood-output
+
+# Package manager
+agent-browser/**/package-lock.json
+agent-browser/**/yarn.lock
+
+# Environment
+agent-browser/**/.env
+agent-browser/**/.env.local
+
+# Windows debug instance config
+agent-browser/**/scripts/windows-debug/.instance
+
+# opensrc - source code for packages
+agent-browser/**/opensrc
+
+# Docs site
+agent-browser/**/docs/node_modules
+agent-browser/**/docs/.next
+agent-browser/**/docs/out
+agent-browser/**/docs/package-lock.json
+
+# pnpm
+agent-browser/**/.pnpm-store
+
+# TypeScript
+agent-browser/**/*.tsbuildinfo
+
+# next
+agent-browser/**/.next
+agent-browser/**/out
+
+# flyctl launch added from agent-browser/benchmarks/.gitignore
+agent-browser/benchmarks/**/node_modules
+agent-browser/benchmarks/**/results.json
+
+# flyctl launch added from agent-browser/docs/.gitignore
+# See https://help.github.com/articles/ignoring-files/ for more about ignoring files.
+
+# dependencies
+agent-browser/docs/node_modules
+agent-browser/docs/.pnp
+agent-browser/docs/**/.pnp.*
+agent-browser/docs/**/.yarn/*
+!agent-browser/docs/**/.yarn/patches
+!agent-browser/docs/**/.yarn/plugins
+!agent-browser/docs/**/.yarn/releases
+!agent-browser/docs/**/.yarn/versions
+
+# testing
+agent-browser/docs/coverage
+
+# next.js
+agent-browser/docs/.next
+agent-browser/docs/out
+
+# production
+agent-browser/docs/build
+
+# misc
+agent-browser/docs/**/.DS_Store
+agent-browser/docs/**/*.pem
+
+# debug
+agent-browser/docs/**/npm-debug.log*
+agent-browser/docs/**/yarn-debug.log*
+agent-browser/docs/**/yarn-error.log*
+agent-browser/docs/**/.pnpm-debug.log*
+
+# env files (can opt-in for committing if needed)
+agent-browser/docs/**/.env*
+
+# vercel
+agent-browser/docs/**/.vercel
+
+# typescript
+agent-browser/docs/**/*.tsbuildinfo
+agent-browser/docs/**/next-env.d.ts
+
+# flyctl launch added from agent-browser/evals/.gitignore
+agent-browser/evals/**/node_modules
+agent-browser/evals/**/dist
+agent-browser/evals/**/bun.lockb
+
+# flyctl launch added from agent-browser/examples/environments/.gitignore
+agent-browser/examples/environments/**/node_modules
+agent-browser/examples/environments/**/.next
+agent-browser/examples/environments/**/.env
+agent-browser/examples/environments/**/.env.local
+agent-browser/examples/environments/**/.env*.local
+agent-browser/examples/environments/**/next-env.d.ts
+
+# flyctl launch added from claude-code/.gitignore
+claude-code/**/.DS_Store
+
+
+# flyctl launch added from claude-code/plugins/hookify/.gitignore
+# Python
+claude-code/plugins/hookify/**/__pycache__
+claude-code/plugins/hookify/**/*.py[cod]
+claude-code/plugins/hookify/**/*$py.class
+claude-code/plugins/hookify/**/*.so
+claude-code/plugins/hookify/**/.Python
+
+# Virtual environments
+claude-code/plugins/hookify/**/venv
+claude-code/plugins/hookify/**/env
+claude-code/plugins/hookify/**/ENV
+
+# IDE
+claude-code/plugins/hookify/**/.vscode
+claude-code/plugins/hookify/**/.idea
+claude-code/plugins/hookify/**/*.swp
+claude-code/plugins/hookify/**/*.swo
+
+# OS
+claude-code/plugins/hookify/**/.DS_Store
+claude-code/plugins/hookify/**/Thumbs.db
+
+# Testing
+claude-code/plugins/hookify/**/.pytest_cache
+claude-code/plugins/hookify/**/.coverage
+claude-code/plugins/hookify/**/htmlcov
+
+# Local configuration (should not be committed)
+claude-code/plugins/hookify/**/.claude/*.local.md
+claude-code/plugins/hookify/**/.claude/*.local.json
+
+# flyctl launch added from claude-code/plugins/syber/.gitignore
+claude-code/plugins/syber/**/__pycache__
+claude-code/plugins/syber/**/*.pyc
+
+# flyctl launch added from syber-platform/.gitignore
+syber-platform/**/.venv
+syber-platform/**/__pycache__
+syber-platform/**/*.pyc
+syber-platform/**/.investigation_state
+syber-platform/**/.audit_log
+syber-platform/**/.memory_store.sqlite
+syber-platform/**/.env
+syber-platform/**/syber/scoring/calibration/platt_scaler.joblib
+syber-platform/**/dist/*.tar.gz
+
+# benchmark dataset cache (CTIBench data is CC-BY-NC-SA — do not commit)
+syber-platform/**/.bench_cache
+syber-platform/**/.bench_results
+
+# flyctl launch added from syber-platform/.pytest_cache/.gitignore
+# Created by pytest automatically.
+syber-platform/.pytest_cache/**/*
+fly.toml

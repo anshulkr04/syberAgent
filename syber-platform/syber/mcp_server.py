@@ -418,6 +418,26 @@ def syber_verify_data_exposure(url: str, method: str = "GET",
 
 
 # --------------------------------------------------------------------------- #
+# Reporting — email the verifiable report + proofs to the operator
+# --------------------------------------------------------------------------- #
+@mcp.tool()
+def syber_send_report(to: str = "", target: str = "", attachments: list[str] | None = None,
+                      subject: str = "") -> dict[str, Any]:
+    """Email the engagement report with ATTACHED PROOFS so the operator can verify each
+    finding is real and forward it to the target organisation. The report lists every
+    published finding (severity, attack chain, MITRE, evidence_refs) and attaches the
+    actual artefacts: the downloaded data samples (redacted) from syber_verify_data_exposure,
+    plus any screenshots / captures you pass in `attachments` (absolute paths). Everything in
+    the evidence dir (.investigation_state/evidence/) is attached automatically. Call this as
+    the FINAL step, after findings are published + gated. Recipient = `to` or SYBER_REPORT_TO.
+    Requires RESEND_API_KEY. Before calling, capture agent-browser screenshots of each
+    confirmed finding and pass their paths so the operator sees concrete proof."""
+    from syber.reporting import build_and_send
+    return _integration(build_and_send, to=to or None, target=target,
+                        extra_attachments=attachments, subject=subject or None)
+
+
+# --------------------------------------------------------------------------- #
 # Identity provisioning (AgentMail / AgentPhone) — for multi-account IDOR/BOLA
 # --------------------------------------------------------------------------- #
 @mcp.tool()

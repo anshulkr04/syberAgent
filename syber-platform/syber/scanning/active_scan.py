@@ -39,6 +39,26 @@ def _env_timeout(default: int) -> int:
         v = 0
     return v if v > 0 else default
 
+
+def _resolve_timeout(timeout: int | None, default: int) -> int:
+    """An EXPLICIT caller timeout wins; only when it is None does SYBER_SCAN_TIMEOUT /
+    the default apply. (Previously SYBER_SCAN_TIMEOUT overrode even explicit per-stage
+    values, so full_scan's three stages each ran to the full 900s ⇒ ~45-min scans.)"""
+    return timeout if timeout is not None else _env_timeout(default)
+
+
+def _fullscan_budget(explicit: int | None) -> int:
+    """Total wall-clock budget for one full_scan, split across its stages so a single
+    orchestrated scan is bounded (not 3× the per-stage timeout). `SYBER_FULLSCAN_BUDGET`
+    overrides; default 600s (~10 min)."""
+    if explicit is not None:
+        return explicit
+    try:
+        b = int(os.environ.get("SYBER_FULLSCAN_BUDGET", "0"))
+    except ValueError:
+        b = 0
+    return b if b > 0 else 1800   # thorough default: ~30 min/target, split across stages
+
 # Reasonable common-port set for the pure-python fallback scanner.
 COMMON_PORTS = [21, 22, 23, 25, 53, 80, 110, 111, 135, 139, 143, 389, 443, 445,
                 465, 587, 993, 995, 1433, 1723, 2049, 3306, 3389, 5432, 5900,
@@ -93,7 +113,7 @@ def _run(cmd: list[str], timeout: int) -> tuple[int, str, str]:
 # --------------------------------------------------------------------------- #
 def port_scan(target: str, ports: str | None = None, timeout: int | None = None) -> dict[str, Any]:
     """nmap TCP connect scan (no root needed). Falls back to a python scanner."""
-    timeout = _env_timeout(300 if timeout is None else timeout)
+    timeout = _resolve_timeout(timeout, 300)
     _require_authorized(target)
     if _have("nmap"):
         cmd = ["nmap", "-sT", "-Pn", "-T4", "-oX", "-"]
@@ -169,7 +189,7 @@ def _parse_nmap_xml(xml: str) -> dict[str, Any]:
 # --------------------------------------------------------------------------- #
 def service_scan(target: str, ports: str | None = None, timeout: int | None = None) -> dict[str, Any]:
     """nmap -sV -sC: service versions + safe default NSE scripts."""
-    timeout = _env_timeout(420 if timeout is None else timeout)
+    timeout = _resolve_timeout(timeout, 300)
     _require_authorized(target)
     if not _have("nmap"):
         return {"tool": "nmap", "available": False, "note": "nmap not installed; use port_scan fallback"}
@@ -201,13 +221,48 @@ def web_scan(target: str, timeout: int | None = None) -> dict[str, Any]:
 # --------------------------------------------------------------------------- #
 # Content discovery (gobuster -> ffuf -> none)
 # --------------------------------------------------------------------------- #
-def content_discovery(target: str, wordlist: str | None = None, timeout: int | None = None) -> dict[str, Any]:
-    timeout = _env_timeout(240 if timeout is None else timeout)
+def content_discovery(target: str, wordlist: str | None = None, timeout: int | None = None,
+                      recursive: bool | None = None) -> dict[str, Any]:
+    timeout = _resolve_timeout(timeout, 600)
     _require_authorized(target)
     url = _as_url(target)
     wl = wordlist or _ensure_wordlist()
+    # Recursion is on by default (SYBER_DISCOVERY_DEPTH controls how deep); a real
+    # engagement wants to descend into discovered directories, not just level 1.
+    if recursive is None:
+        recursive = os.environ.get("SYBER_DISCOVERY_RECURSIVE", "1") not in ("0", "false", "off", "")
+    depth = _int_env("SYBER_DISCOVERY_DEPTH", 2)
+
+    # feroxbuster — recursive, fast, best-in-class content discovery (preferred).
+    if _have("feroxbuster"):
+        cmd = ["feroxbuster", "-u", url, "-w", wl, "-q", "--json", "--no-state",
+               "-t", "40", "-k", "--auto-tune",
+               "-C", "404,400,502,503",              # filter noise
+               "-s", "200,204,301,302,307,308,401,403,405,500"]
+        cmd += ["-d", str(max(1, depth))] if recursive else ["-d", "1"]
+        rc, out, err = _run(cmd, timeout)
+        paths, seen = [], set()
+        for ln in (out or "").splitlines():
+            ln = ln.strip()
+            if not ln.startswith("{"):
+                continue
+            try:
+                rec = json.loads(ln)
+            except json.JSONDecodeError:
+                continue
+            if rec.get("type") != "response":
+                continue
+            u = rec.get("url") or ""
+            path = "/" + u.split("://", 1)[-1].split("/", 1)[-1] if "://" in u else u
+            if path and path not in seen:
+                seen.add(path)
+                paths.append({"path": path, "status": rec.get("status"),
+                              "info": f"len={rec.get('content_length', '')}"})
+        return {"tool": "feroxbuster", "target": url, "wordlist": wl, "recursive": recursive,
+                "depth": depth if recursive else 1, "found": paths, "found_count": len(paths)}
+
     if _have("gobuster"):
-        rc, out, err = _run(["gobuster", "dir", "-u", url, "-w", wl, "-q", "-t", "30",
+        rc, out, err = _run(["gobuster", "dir", "-u", url, "-w", wl, "-q", "-t", "40",
                              "--no-error", "-z"], timeout)
         paths = []
         for ln in (out or "").splitlines():
@@ -236,13 +291,19 @@ def content_discovery(target: str, wordlist: str | None = None, timeout: int | N
 # Templated vulnerability scan (nuclei)
 # --------------------------------------------------------------------------- #
 def vuln_scan(target: str, severity: str = "low,medium,high,critical", timeout: int | None = None) -> dict[str, Any]:
-    timeout = _env_timeout(420 if timeout is None else timeout)
+    timeout = _resolve_timeout(timeout, 300)
     _require_authorized(target)
     if not _have("nuclei"):
         return {"tool": "nuclei", "available": False, "note": "nuclei not installed"}
     url = _as_url(target)
-    rc, out, err = _run(["nuclei", "-u", url, "-jsonl", "-silent", "-severity", severity,
-                         "-rate-limit", "50", "-timeout", "8"], timeout)
+    cmd = ["nuclei", "-u", url, "-jsonl", "-silent", "-severity", severity,
+           "-rate-limit", "150", "-timeout", "10", "-retries", "1",
+           "-c", "40",                                  # 40 concurrent templates
+           "-fr"]                                       # follow redirects (SPAs/CDNs)
+    if os.environ.get("SYBER_NUCLEI_FULL", "1") not in ("0", "false", "off", ""):
+        cmd += ["-tags", "cve,exposure,misconfig,exposed-panels,default-login,takeover,"
+                         "tech,sqli,xss,lfi,rce,ssrf,redirect,auth-bypass"]
+    rc, out, err = _run(cmd, timeout)
     findings = []
     for ln in (out or "").splitlines():
         ln = ln.strip()
@@ -264,19 +325,24 @@ def vuln_scan(target: str, severity: str = "low,medium,high,critical", timeout: 
 def full_scan(target: str, do_web: bool = True, timeout_each: int | None = None) -> dict[str, Any]:
     """Port + service scan; if web ports are open, content discovery + nuclei.
     Ingests the result into the knowledge graph (Neo4j when configured)."""
-    timeout_each = _env_timeout(300 if timeout_each is None else timeout_each)
+    # Total wall-clock budget split across stages, so a full_scan is bounded (~10 min
+    # by default) instead of 3× the per-stage timeout. Explicit stage timeouts are now
+    # honoured (see _resolve_timeout), so these caps actually apply.
+    budget = _fullscan_budget(timeout_each)
+    svc_t = max(60, int(budget * 0.2))       # service scan is cheap (nmap top-200)
+    web_t = max(120, int(budget * 0.4))      # content discovery + nuclei get the bulk
     _require_authorized(target)
-    result: dict[str, Any] = {"target": target, "stages": {}}
-    svc = service_scan(target, timeout=timeout_each + 120)
+    result: dict[str, Any] = {"target": target, "stages": {}, "budget_s": budget}
+    svc = service_scan(target, timeout=svc_t)
     if "open_ports" not in svc:  # nmap absent -> fall back to plain port scan
-        svc = port_scan(target, timeout=timeout_each)
+        svc = port_scan(target, timeout=svc_t)
     result["stages"]["service_scan"] = svc
 
     open_ports = svc.get("open_ports", [])
     web_open = any(p["port"] in (80, 443, 8080, 8443, 8000, 8888) for p in open_ports)
     if do_web and web_open:
-        result["stages"]["content_discovery"] = content_discovery(target, timeout=timeout_each)
-        result["stages"]["vuln_scan"] = vuln_scan(target, timeout=timeout_each + 120)
+        result["stages"]["content_discovery"] = content_discovery(target, timeout=web_t)
+        result["stages"]["vuln_scan"] = vuln_scan(target, timeout=web_t)
 
     result["graph"] = ingest_scan_to_graph(target, svc, result["stages"].get("vuln_scan"))
     result["summary"] = _summarise(target, result)
@@ -362,11 +428,30 @@ def _expand_ports(spec: str) -> list[int]:
     return out
 
 
+def _int_env(name: str, default: int) -> int:
+    try:
+        v = int(os.environ.get(name, ""))
+        return v if v > 0 else default
+    except (ValueError, TypeError):
+        return default
+
+
 def _ensure_wordlist() -> str:
-    for candidate in ("/usr/share/wordlists/dirb/common.txt",
-                      "/usr/share/wordlists/dirbuster/directory-list-2.3-small.txt",
-                      "/usr/share/seclists/Discovery/Web-Content/common.txt"):
-        if shutil.os.path.isfile(candidate):
+    """Pick the richest available content-discovery wordlist. Prefers large real lists
+    (raft-medium ~30k, dirbuster medium) over the tiny built-in. Override with
+    SYBER_WORDLIST=/path. Baked in the Kali image via the seclists package."""
+    override = os.environ.get("SYBER_WORDLIST")
+    if override and os.path.isfile(override):
+        return override
+    for candidate in (
+            "/usr/share/seclists/Discovery/Web-Content/raft-medium-directories.txt",
+            "/usr/share/seclists/Discovery/Web-Content/raft-large-words.txt",
+            "/usr/share/seclists/Discovery/Web-Content/directory-list-2.3-medium.txt",
+            "/usr/share/wordlists/dirbuster/directory-list-2.3-medium.txt",
+            "/usr/share/seclists/Discovery/Web-Content/common.txt",
+            "/usr/share/wordlists/dirb/common.txt",
+            "/usr/share/wordlists/dirbuster/directory-list-2.3-small.txt"):
+        if os.path.isfile(candidate):
             return candidate
     tf = tempfile.NamedTemporaryFile("w", suffix=".txt", delete=False)
     tf.write("\n".join(BUILTIN_WORDLIST))

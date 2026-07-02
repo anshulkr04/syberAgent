@@ -16,12 +16,22 @@ SHELL ["/bin/bash", "-c"]
 # chromium package is the reliable way to get a working browser + all its deps.
 RUN apt-get update && apt-get install -y --no-install-recommends \
       nmap nikto gobuster ffuf masscan nuclei sslscan whatweb \
+      subfinder dnsx amass massdns puredns \
       dnsutils whois netcat-traditional iproute2 \
       python3 python3-venv python3-pip \
       curl git ca-certificates jq xz-utils sudo \
       chromium fonts-liberation \
       exploitdb feroxbuster wafw00f hydra redis-tools \
+      seclists \
  && rm -rf /var/lib/apt/lists/*
+# seclists = real content-discovery + DNS wordlists (raft-medium ~30k, subdomains lists)
+# so content_discovery and puredns brute have proper wordlists (not the 81-path builtin).
+# Fresh validated DNS resolvers for puredns (trickest, updated frequently).
+RUN curl -fsSL -o /opt/resolvers.txt \
+      https://raw.githubusercontent.com/trickest/resolvers/main/resolvers.txt || \
+    printf '1.1.1.1\n8.8.8.8\n8.8.4.4\n9.9.9.9\n1.0.0.1\n' > /opt/resolvers.txt
+# Subdomain enumeration (robust, no single point of failure): subfinder (~30 passive
+# sources) + dnsx (resolve/validate) + amass; massdns+puredns for opt-in active brute.
 # Deep-verification tooling (Phase 8): exploitdb=searchsploit (CVE correlation),
 # feroxbuster (recursive content discovery), wafw00f (WAF id), hydra + nuclei
 # default-logins (credential verification), redis-tools (datastore probe). testssl.sh

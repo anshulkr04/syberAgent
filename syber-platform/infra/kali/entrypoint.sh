@@ -20,8 +20,16 @@ export SYBER_WIPE_ON_EXIT="${SYBER_WIPE_ON_EXIT:-1}"
 # nmap -sV -sC / nuclei can run for minutes. Give MCP generous ceilings and a
 # default scan timeout the engine honours (syber.scanning.active_scan).
 export MCP_TIMEOUT="${MCP_TIMEOUT:-120000}"            # server startup (ms)
-export MCP_TOOL_TIMEOUT="${MCP_TOOL_TIMEOUT:-1800000}" # per tool call: 30 min (ms)
-export SYBER_SCAN_TIMEOUT="${SYBER_SCAN_TIMEOUT:-900}" # per scan stage: 15 min (s)
+export MCP_TOOL_TIMEOUT="${MCP_TOOL_TIMEOUT:-2700000}" # per tool call: 45 min (ms) — > full_scan budget
+export SYBER_SCAN_TIMEOUT="${SYBER_SCAN_TIMEOUT:-600}"  # per STANDALONE scan stage: 10 min (s)
+export SYBER_FULLSCAN_BUDGET="${SYBER_FULLSCAN_BUDGET:-1800}" # TOTAL full_scan budget, split across stages: ~30 min
+# --- Thorough-engagement depth defaults (override to trade depth for speed) ---
+export SYBER_DISCOVERY_RECURSIVE="${SYBER_DISCOVERY_RECURSIVE:-1}"  # feroxbuster recursion on
+export SYBER_DISCOVERY_DEPTH="${SYBER_DISCOVERY_DEPTH:-2}"          # recurse 2 levels into found dirs
+export SYBER_CRAWL_PAGES="${SYBER_CRAWL_PAGES:-150}"               # crawl up to 150 pages
+export SYBER_CRAWL_DEPTH="${SYBER_CRAWL_DEPTH:-3}"                 # to depth 3
+export SYBER_NUCLEI_FULL="${SYBER_NUCLEI_FULL:-1}"                # wide nuclei tag coverage
+export SYBER_SUBDOMAIN_BRUTE="${SYBER_SUBDOMAIN_BRUTE:-1}"        # active puredns DNS brute on
 
 # --- In-network backends (docker compose service names) --------------------
 export NEO4J_URI="${NEO4J_URI:-bolt://neo4j:7687}"

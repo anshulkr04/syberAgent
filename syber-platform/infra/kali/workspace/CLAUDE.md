@@ -228,6 +228,10 @@ after any compaction.
   sensitive data — the rung-4/CRITICAL proof; a `200`/`true` is reachability, not impact).
   `syber_crawl` also returns `inferred_endpoints` — synthesised REST routes the crawl couldn't link
   (e.g. `/api/v1/users/1`); probe them with `syber_test_access_control` / `syber_http_request`.
+- **Reporting:** `syber_send_report to=<email> target=<t> attachments=[<screenshot paths>]` — emails the
+  operator a verifiable report (every finding + attack chain + MITRE) with PROOFS attached: the downloaded
+  data samples (auto-collected from `.investigation_state/evidence/`) + any screenshots you pass. Do this
+  as the final step so the operator can confirm findings are real and forward them. Needs `RESEND_API_KEY`.
 - **Identity provisioning (for authenticated/IDOR testing):** `syber_provision_identity` (real
   email inbox ± phone), `syber_check_inbox` (verification link/OTP from signup mail),
   `syber_read_sms` (SMS OTP), `syber_phone_status`. Backed by AgentMail/AgentPhone; the `agentmail`

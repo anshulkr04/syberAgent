@@ -52,6 +52,15 @@ from .verify import Verdict, classify_verdict
 
 AB = "agent-browser"
 
+
+def _int_env(name: str, default: int) -> int:
+    try:
+        v = int(os.environ.get(name, ""))
+        return v if v > 0 else default
+    except (ValueError, TypeError):
+        return default
+
+
 # A realistic desktop Chrome UA for the HTTP-client fallback transport.
 _UA = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
        "(KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36")
@@ -471,11 +480,16 @@ def _get_waf():
 # --------------------------------------------------------------------------- #
 # Crawl — map endpoints + parameters into the graph
 # --------------------------------------------------------------------------- #
-def crawl(target: str, max_pages: int = 40, max_depth: int = 2,
+def crawl(target: str, max_pages: int | None = None, max_depth: int | None = None,
           cookies: str | None = None, timeout: int = 20) -> dict[str, Any]:
     """Breadth-first crawl of an AUTHORISED web target. Discovers endpoints, forms,
     and parameters (the application attack surface) and ingests them into the graph.
-    Returns the endpoint inventory."""
+    Returns the endpoint inventory. Depth/breadth default to a thorough crawl and are
+    overridable via SYBER_CRAWL_PAGES / SYBER_CRAWL_DEPTH."""
+    if max_pages is None:
+        max_pages = _int_env("SYBER_CRAWL_PAGES", 150)
+    if max_depth is None:
+        max_depth = _int_env("SYBER_CRAWL_DEPTH", 3)
     start = _as_url(target)
     host = urlparse(start).netloc.split(":")[0]
     _require_authorized(host)
@@ -514,6 +528,17 @@ def crawl(target: str, max_pages: int = 40, max_depth: int = 2,
     # so the access-control / injection probes have surface the crawl couldn't link.
     all_params = sorted({p for ep in endpoints for p in ep.get("params", [])})
     inferred = infer_endpoints([ep["url"] for ep in endpoints], entities=None)
+    # Ingest inferred endpoints too (marked), so the fleet's injection/IDOR frontier
+    # rules spawn probe tasks for them — previously they were returned but never tested.
+    try:
+        from ..graph import model
+        for iu in inferred:
+            u = iu.get("url") if isinstance(iu, dict) else iu
+            if u:
+                model.upsert_web_endpoint(host, u, method=(iu.get("method", "GET") if isinstance(iu, dict) else "GET"),
+                                          params=(iu.get("params", []) if isinstance(iu, dict) else []))
+    except Exception:  # noqa: BLE001 - inference ingest is best-effort
+        pass
     from ..audit.log import get_audit_log
     get_audit_log().write("webapp_crawl", {"target": host, "pages": len(seen),
                                             "endpoints": len(endpoints), "forms": len(all_forms),
