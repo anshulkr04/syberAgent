@@ -5,7 +5,7 @@ import base64
 
 import pytest
 
-from syber.integrations import resend, IntegrationNotConfigured
+from syber.integrations import resend, IntegrationError, IntegrationNotConfigured
 from syber import reporting
 
 
@@ -99,8 +99,10 @@ def test_render_html_orders_by_severity_and_escapes():
     assert "acme.com" in html and "p.png" in html
 
 
-def test_build_and_send(monkeypatch):
+def test_build_and_send_always_uses_operator_env(monkeypatch):
     monkeypatch.setenv("RESEND_API_KEY", "re_test")
+    monkeypatch.setenv("SYBER_REPORT_TO", "operator@corp.com")
+    monkeypatch.delenv("SYBER_REPORT_ALLOWED", raising=False)
     sent = {}
 
     class _Sink:
@@ -113,13 +115,21 @@ def test_build_and_send(monkeypatch):
         return {"id": "email_9"}
     monkeypatch.setattr(reporting.resend, "send_email", fake_send)
 
-    out = reporting.build_and_send(to="me@x.com", target="acme.com")
-    assert out["sent"] is True and out["message_id"] == "email_9"
-    assert out["finding_count"] == 2 and out["attachment_count"] == 1
-    assert sent["to"] == "me@x.com" and "acme.com" in sent["subject"]
+    # no `to` -> operator env used
+    out = reporting.build_and_send(target="acme.com")
+    assert out["to"] == "operator@corp.com" and sent["to"] == "operator@corp.com"
+
+    # an agent-supplied recipient that ISN'T the configured one is REFUSED (anti-exfil)
+    with pytest.raises(IntegrationError):
+        reporting.build_and_send(to="attacker@evil.com", target="acme.com")
+
+    # a `to` that matches the configured recipient is accepted, still sends to the operator
+    out2 = reporting.build_and_send(to="operator@corp.com", target="acme.com")
+    assert out2["to"] == "operator@corp.com"
 
 
-def test_build_and_send_requires_recipient(monkeypatch):
+def test_build_and_send_requires_configured_recipient(monkeypatch):
+    monkeypatch.setenv("RESEND_API_KEY", "re_test")
     monkeypatch.delenv("SYBER_REPORT_TO", raising=False)
     with pytest.raises(IntegrationNotConfigured):
-        reporting.build_and_send(to=None, target="x")
+        reporting.build_and_send(to="anything@x.com", target="x")

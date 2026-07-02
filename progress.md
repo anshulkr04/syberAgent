@@ -1012,6 +1012,15 @@ can verify findings are real and forward to the target org. Built:
   all pass. All new files compile; both .mcp.json valid; script lints. **REBUILD REQUIRED** (new modules +
   MCP tool): `docker compose -f infra/docker-compose.kali.yml build kali`.
 
+**RECIPIENT LOCKED TO OPERATOR (2026-07-02):** a run emailed the report to `operator@syber.ai` (a model-
+invented address) instead of `.env`'s SYBER_REPORT_TO — because the MCP tool exposed a `to` param and
+`build_and_send` did `to or env(...)`, so an agent-supplied `to` OVERRODE the env. Since the report carries
+real findings + downloaded PII/secret samples, letting the model pick the destination is a data-exfil risk.
+Fixed: recipient now ALWAYS = SYBER_REPORT_TO (operator env); a model-supplied `to` is honoured only if it
+exactly matches SYBER_REPORT_TO or SYBER_REPORT_ALLOWED, else refused. Dropped `to` from the `syber_send_report`
+MCP signature (passes to=None); doctrine (CLAUDE.md + it already used target= in syber_fleet.sh) says the
+recipient is operator-fixed, never invented. Tests updated (operator-env-always + anti-exfil refusal); 239 pass.
+
 **⚠ AUTH REGRESSION (needs a decision):** `authorization.py::is_authorized` is currently
 `return True, f"...{self._auths[target].kind}"` (always-allow) — this defeats default-deny AND KeyErrors for
 any target not already in `_auths` (crashes the tool instead of a clean refusal). It fails 8 tests

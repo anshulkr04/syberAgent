@@ -20,7 +20,7 @@ from pathlib import Path
 from typing import Any
 
 from .config import PATHS
-from .integrations import IntegrationNotConfigured, env, resend
+from .integrations import IntegrationError, IntegrationNotConfigured, env, resend
 from .tools.findings import get_findings_sink
 
 # Attachment guards (Resend total limit ~40 MB; base64 inflates ~33%).
@@ -124,12 +124,28 @@ def render_text(findings: list[dict[str, Any]], target: str, attach_names: list[
 def build_and_send(to: str | None = None, target: str = "",
                    extra_attachments: list[str] | None = None,
                    subject: str | None = None) -> dict[str, Any]:
-    """Gather findings + proofs and email the report via Resend."""
-    recipient = to or env("SYBER_REPORT_TO")
-    if not recipient:
+    """Gather findings + proofs and email the report via Resend.
+
+    SECURITY: the recipient ALWAYS comes from the operator's env (SYBER_REPORT_TO) —
+    NOT from the caller/agent. The report contains real findings + downloaded PII/secret
+    samples, so the destination must be operator-controlled; a model must never be able to
+    redirect it. A model-supplied `to` is honoured only if it exactly matches SYBER_REPORT_TO
+    (or an allowlisted SYBER_REPORT_ALLOWED address); anything else is refused."""
+    configured = env("SYBER_REPORT_TO")
+    if not configured:
         raise IntegrationNotConfigured(
-            "No recipient: pass to=<email> or set SYBER_REPORT_TO in .env. (With the default "
-            "onboarding@resend.dev sender, the recipient must be your Resend account email.)")
+            "SYBER_REPORT_TO is not set. The report recipient is operator-controlled and must be "
+            "configured in .env (it is never taken from the agent). Set SYBER_REPORT_TO=you@example.com.")
+    allowed = {configured.strip().lower()}
+    for extra in (env("SYBER_REPORT_ALLOWED") or "").split(","):
+        if extra.strip():
+            allowed.add(extra.strip().lower())
+    if to and to.strip().lower() not in allowed:
+        raise IntegrationError(
+            f"Refusing to send the report to '{to}': not the operator-configured recipient. "
+            f"The report goes only to SYBER_REPORT_TO (+ SYBER_REPORT_ALLOWED). Ignoring the "
+            f"agent-supplied address.")
+    recipient = configured   # always the operator's address, regardless of what the agent passed
     findings = list(get_findings_sink().candidates)
     attachments = collect_attachments(extra_attachments)
     names = [a["filename"] for a in attachments]
