@@ -140,12 +140,20 @@ STEP 6 — For each VERIFIED issue: syber_publish_finding (attack_chain + per-st
    the rung you have EVIDENCE for) then syber_gate_finding. Only CONFIRMED verdicts ship — a reflected
    payload is not execution; a claimed secret/token must appear in real tool output.
 
+STEP 7 — CAPTURE PROOF, then EMAIL THE REPORT. For each confirmed finding, capture concrete proof: an
+   agent-browser screenshot of the exposed page/console/Swagger, and the downloaded data sample from
+   syber_verify_data_exposure (saved automatically under .investigation_state/evidence/). Then call
+   syber_send_report target=${TARGET} attachments=[<paths to the screenshots you saved>] — it emails the
+   operator the full report with every proof attached (data samples auto-included) so they can verify
+   each finding is real and forward it to the org. Reporting is the last step; do it before finishing.
+
 DO NOT CONCLUDE until ALL of these are true (persistence is mandatory — err toward digging longer):
   - syber_enumerate_subdomains has run and EVERY non-prod host it found has been scanned + crawled + had
     its JS analysed + been checked for an exposed API spec;
   - syber_leads_status shows NO open high-value lead (each is VERIFIED or genuinely EXHAUSTED with logged
     attempts);
-  - findings are published AND gated.
+  - findings are published AND gated;
+  - the report has been emailed via syber_send_report (with proof screenshots + data samples attached).
 A WAF block, "the SPA hid the routes", or "prod looks hardened" are NOT acceptable stopping points — they
 mean pivot (non-prod / origin / JS-named APIs), not stop. "No critical findings" is only valid AFTER the
 full methodology above is exhausted across ALL discovered subdomains — never on the prod surface alone.
@@ -164,8 +172,10 @@ syber_waf_*. A prod WAF 403 is NOT a result — pivot to non-prod subdomains, th
 and JS-named API subdomains. For any unauthenticated API/data endpoint or leaked API spec, call
 syber_verify_data_exposure to PULL a real sample and confirm sensitive data before claiming IMPACT/CRITICAL
 (a 200/true is reachability, not impact). Do NOT conclude while any high-value lead is open or any non-prod
-host is unexplored. Gate every confirmed finding, then print ENGAGEMENT_COMPLETE: <summary> (and
-CRITICAL_CONFIRMED if a critical was gated).${CONTEXT_BLOCK}"
+host is unexplored. Gate every confirmed finding. As the FINAL step, capture proof screenshots and call
+syber_send_report target=${TARGET} attachments=[<screenshot paths>] to email the operator the verifiable
+report with proofs. Then print ENGAGEMENT_COMPLETE: <summary> (and CRITICAL_CONFIRMED if a critical was
+gated).${CONTEXT_BLOCK}"
 
 MSG="$SEED"
 pass=1
