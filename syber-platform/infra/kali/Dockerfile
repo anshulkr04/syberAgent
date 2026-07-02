@@ -14,31 +14,34 @@ SHELL ["/bin/bash", "-c"]
 # Install chromium via apt rather than hand-listing X/GTK libs: Kali (Debian sid)
 # did the time_t 64-bit transition (libasound2 -> libasound2t64, etc.), so the
 # chromium package is the reliable way to get a working browser + all its deps.
+# CORE tools — must all resolve (build fails loudly if any is missing).
 RUN apt-get update && apt-get install -y --no-install-recommends \
       nmap nikto gobuster ffuf masscan nuclei sslscan whatweb \
-      subfinder dnsx amass massdns puredns \
       dnsutils whois netcat-traditional iproute2 \
       python3 python3-venv python3-pip \
       curl git ca-certificates jq xz-utils sudo \
       chromium fonts-liberation \
       exploitdb feroxbuster wafw00f hydra redis-tools \
-      seclists \
  && rm -rf /var/lib/apt/lists/*
-# seclists = real content-discovery + DNS wordlists (raft-medium ~30k, subdomains lists)
-# so content_discovery and puredns brute have proper wordlists (not the 81-path builtin).
-# Fresh validated DNS resolvers for puredns (trickest, updated frequently).
-RUN curl -fsSL -o /opt/resolvers.txt \
-      https://raw.githubusercontent.com/trickest/resolvers/main/resolvers.txt || \
-    printf '1.1.1.1\n8.8.8.8\n8.8.4.4\n9.9.9.9\n1.0.0.1\n' > /opt/resolvers.txt
-# Subdomain enumeration (robust, no single point of failure): subfinder (~30 passive
-# sources) + dnsx (resolve/validate) + amass; massdns+puredns for opt-in active brute.
 # Deep-verification tooling (Phase 8): exploitdb=searchsploit (CVE correlation),
 # feroxbuster (recursive content discovery), wafw00f (WAF id), hydra + nuclei
 # default-logins (credential verification), redis-tools (datastore probe). testssl.sh
 # and git-dumper are fetched below (not reliably packaged).
-# Slim: the multi-hundred-MB seclists/wordlists packages are omitted. Content
-# discovery uses a bundled common-path list (active_scan.BUILTIN_WORDLIST); for a
-# full wordlist on a real engagement run `sudo apt-get install -y seclists` in-container.
+
+# ENUMERATION tools + wordlists — BEST-EFFORT (a missing/renamed pkg must NOT fail the
+# build; the Python layer degrades gracefully via _have()/wordlist fallback). Installed
+# one-per-line so one bad name doesn't drop the rest. seclists = real content + DNS
+# wordlists (raft-medium ~30k) so we're not stuck on the 81-path builtin.
+RUN apt-get update && \
+    for pkg in subfinder dnsx amass massdns puredns seclists; do \
+      apt-get install -y --no-install-recommends "$pkg" \
+        || echo "WARN: optional package '$pkg' unavailable — Syber degrades gracefully"; \
+    done; \
+    rm -rf /var/lib/apt/lists/*
+# Fresh validated DNS resolvers for puredns (trickest); static fallback if the fetch fails.
+RUN curl -fsSL -o /opt/resolvers.txt \
+      https://raw.githubusercontent.com/trickest/resolvers/main/resolvers.txt \
+    || printf '1.1.1.1\n8.8.8.8\n8.8.4.4\n9.9.9.9\n1.0.0.1\n' > /opt/resolvers.txt
 
 # --- testssl.sh (TLS audit) + vulners.nse (nmap CVE correlation) -------------
 RUN git clone --depth 1 https://github.com/drwetter/testssl.sh.git /opt/testssl \

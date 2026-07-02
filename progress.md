@@ -1085,6 +1085,13 @@ Every knob is env-tunable, so "too slow" → lower SYBER_FULLSCAN_BUDGET / set S
 SYBER_DISCOVERY_RECURSIVE=0. **239 passed** (only the 8 intentional auth-revert failures); updated my own
 timeout tests to the new 1800 default. REBUILD REQUIRED (Dockerfile + new tool usage).
 
+**BUILD FIX (2026-07-02):** adding the enum tools inline to the core apt-get install broke the build on the
+user's VM (exit 100 — one of `subfinder dnsx amass massdns puredns seclists` doesn't resolve under that name
+in their Kali mirror, likely `puredns`, and a single bad name fails the WHOLE install → took down all core
+tools). Split into: CORE install (must succeed) + a BEST-EFFORT loop (`for pkg in …; do apt-get install "$pkg"
+|| echo WARN; done`) so a missing/renamed pkg only warns. The Python layer already degrades gracefully for
+every one (`_have()` gates subfinder/dnsx/puredns/massdns; `_ensure_wordlist` falls back without seclists).
+
 NOTE (tension acknowledged): §21 cut scan time to fix a 45-min hang; this §23 raises it again for depth per
 the user's "thorough" choice. The coordinator per-future-deadline fix (offered, not built) is still the
 right way to bound a genuinely-hung worker independent of these depth budgets.
