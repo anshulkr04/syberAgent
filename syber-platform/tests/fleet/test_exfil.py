@@ -89,10 +89,12 @@ def test_reachable_api_endpoint_classified_as_unauth_api_data():
     assert "data_extraction" in leads.verify_task_kinds_for(lead.lead_class)
 
 
-def test_api_endpoint_non_2xx_not_a_lead():
-    assert leads.classify_node("https://x/api/foo",
-                               {"label": "WebEndpoint", "url": "https://x/api/foo",
-                                "status": 403}) is None
+def test_auth_gated_api_endpoint_is_needauth_lead():
+    # a 401/403 API endpoint is NOT "secure" — it's a needs-auth lead to token-replay
+    lead = leads.classify_node("https://x/api/foo",
+                               {"label": "WebEndpoint", "url": "https://x/api/foo", "status": 403})
+    assert lead is not None and lead.lead_class == leads.LeadClass.AUTH_BYPASS
+    assert "auth_retest" in leads.verify_task_kinds_for(lead.lead_class)
 
 
 def test_swagger_spec_classified_as_exposed_secret():

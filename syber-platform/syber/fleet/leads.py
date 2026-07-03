@@ -115,7 +115,7 @@ _CLASS_VERIFY_KINDS = {
     LeadClass.DEFAULT_CRED_SERVICE: ["default_login_check"],
     LeadClass.VERSION_CVE: ["cve_lookup", "cve_verify"],
     LeadClass.EXPOSED_SECRET: ["exposed_artifact_check", "data_extraction"],
-    LeadClass.AUTH_BYPASS: ["http_verb_tampering"],
+    LeadClass.AUTH_BYPASS: ["auth_retest", "http_verb_tampering", "data_extraction"],
     LeadClass.INJECTION: ["test_injection", "test_access_control"],
     LeadClass.DATASTORE_UNAUTH: ["datastore_unauth_probe"],
     LeadClass.UNAUTH_STATE_CHANGE: ["service_probe", "data_extraction"],
@@ -234,6 +234,15 @@ def _is_2xx(status: Any) -> bool:
         return False
 
 
+def _is_auth_gated(status: Any) -> bool:
+    """401/403 — the endpoint EXISTS and enforces auth. Not 'secure': a lead to get a
+    token (harvested / logged-in) and re-test. This is where the real bugs live."""
+    try:
+        return int(status) in (401, 403)
+    except (TypeError, ValueError):
+        return False
+
+
 def classify_node(node_id: str, props: dict[str, Any]) -> Lead | None:
     """Classify one graph node into a Lead (or None if it isn't lead-worthy yet).
     Pure: deterministic lead id so re-classification is idempotent."""
@@ -245,10 +254,17 @@ def classify_node(node_id: str, props: dict[str, Any]) -> Lead | None:
             return Lead(id=f"lead:secret:{url}", lead_class=LeadClass.EXPOSED_SECRET, target=url)
         if _ADMIN_RX.search(url):
             return Lead(id=f"lead:admin:{url}", lead_class=LeadClass.EXPOSED_ADMIN, target=url)
+        # An auth-gated (401/403) endpoint is a NEEDS-AUTH lead: harvest/obtain a token and
+        # re-test it. "401 No Auth Header" is NOT a resolved finding — it's the START.
+        if _is_auth_gated(props.get("status")):
+            return Lead(id=f"lead:needauth:{url}", lead_class=LeadClass.AUTH_BYPASS, target=url)
         # A reachable (2xx) API/data endpoint is a lead to verify by pulling real data —
         # a 200 is rung 2/3; only a confirmed sensitive sample earns IMPACT.
         if _API_RX.search(url) and _is_2xx(props.get("status")):
             return Lead(id=f"lead:apidata:{url}", lead_class=LeadClass.UNAUTH_API_DATA, target=url)
+        # An /api/ endpoint that merely EXISTS (any status) is still worth an auth-retest.
+        if _API_RX.search(url):
+            return Lead(id=f"lead:needauth:{url}", lead_class=LeadClass.AUTH_BYPASS, target=url)
         return None
 
     if label in ("Technology", "Service"):

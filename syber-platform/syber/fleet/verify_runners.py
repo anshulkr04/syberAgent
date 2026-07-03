@@ -412,6 +412,80 @@ def run_data_extraction(task: Task, board: Board, wid: str) -> WorkerResult:
     return WorkerResult(status="done", note=f"no real data: {ev.summary()}")
 
 
+def run_auth_retest(task: Task, board: Board, wid: str) -> WorkerResult:
+    """Replay an auth-gated endpoint (401/403) with EVERY harvested credential/token, and
+    with documented cred pairs — the "use the tokens lying around" check. If any replay
+    yields 2xx + real data, that's a CONFIRMED broken-auth / token-reuse exposure (IMPACT):
+    a leaked/stale/low-priv token unlocked protected data. A 401 is the START, not the end."""
+    target = task.target_id
+    if not _authorized(target):
+        return WorkerResult(status="failed", note="not authorised")
+    url = getattr(task, "url", "") or _url_for(target)
+    lid = _lead_id(task)
+    try:
+        from ..scanning import webapp
+        from ..scanning.exfil import scan_sensitive, save_sample, is_confirmed
+        from ..scanning import credentials as cred
+    except Exception as e:  # noqa: BLE001
+        return WorkerResult(status="failed", note=f"import failed: {e}")
+
+    store = cred.get_store()
+    # Harvest tokens from THIS endpoint's own body first (it may echo a token), then use
+    # the engagement-wide store (tokens found anywhere are replayed everywhere).
+    try:
+        base = webapp.http_request(url, method="GET", timeout=20)
+        store.add_from_text(base.get("body", ""), source=url)
+    except Exception:  # noqa: BLE001
+        base = {}
+    creds = store.all()
+    if not creds:
+        _record(board, lid, "auth_retest", success=False,
+                note="no credentials/tokens harvested yet to replay (need JS/doc/login token first)")
+        _mark_auth_retested(url)
+        return WorkerResult(status="done", note="no tokens to replay")
+
+    tried = 0
+    for c in creds:
+        for hv in cred.auth_headers(c):
+            tried += 1
+            if tried > 40:                       # bound the replay fan-out per endpoint
+                break
+            try:
+                r = webapp.http_request(url, method="GET", headers=hv, timeout=20)
+            except Exception:  # noqa: BLE001
+                continue
+            status = r.get("status")
+            body = r.get("body", "")
+            ctype = (r.get("headers", {}) or {}).get("content-type", "")
+            ev = scan_sensitive(body, ctype)
+            if is_confirmed(status, ev):
+                hdr_name = next(iter(hv))
+                artefact = save_sample(url, status, body, ev, method="GET",
+                                       request_headers=hv, response_headers=r.get("headers", {}),
+                                       transport=r.get("transport", ""))
+                _ingest_vuln(url, "broken-auth", name=f"broken auth / token reuse ({url})",
+                             severity="critical", source="auth_retest")
+                _mark_auth_retested(url)
+                _record(board, lid, "auth_retest", success=True,
+                        evidence=f"{c.kind} token via {hdr_name} unlocked {url}: {ev.summary()}"
+                                 + (f"; artefact={artefact}" if artefact else ""),
+                        rung=EvidenceRung.IMPACT)
+                return WorkerResult(status="done", result_ref=f"auth_retest:{url}",
+                                    note=f"BROKEN AUTH: {c.kind} token unlocked data via {hdr_name}")
+    _mark_auth_retested(url)
+    _record(board, lid, "auth_retest", success=False,
+            note=f"replayed {tried} token/header variants; none unlocked data (auth holds for these creds)")
+    return WorkerResult(status="done", note=f"auth holds ({tried} replays, no data)")
+
+
+def _mark_auth_retested(url: str) -> None:
+    try:
+        from ..graph import model
+        model.mark_endpoint_auth_retested(url)
+    except Exception:  # noqa: BLE001
+        pass
+
+
 def run_service_probe(task: Task, board: Board, wid: str) -> WorkerResult:
     """Service-specific deep probe. Dispatches by product to the right verification.
     Keycloak: fingerprint + default-cred admin token grant (the failure-case fix)."""
@@ -467,4 +541,5 @@ def verify_runners() -> dict[str, Any]:
         "datastore_unauth_probe": run_datastore_unauth_probe,
         "service_probe": run_service_probe,
         "data_extraction": run_data_extraction,
+        "auth_retest": run_auth_retest,
     }

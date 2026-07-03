@@ -1212,6 +1212,33 @@ taking effect / old report format." Fixed: `syber_fleet.sh`, `syber_engage.sh`, 
 Docker layer caching → ~seconds when unchanged. This removes the recurring stale-image footgun; no separate
 manual `docker compose build` needed anymore.
 
+### 28. Authenticated testing — 401/403 is the START, not "secure" (2026-07-03)
+Regression: on nuvamawealth the agent FOUND the map (`/partner-documentation/` = 73 API pages + auth flows +
+sample payloads, `np.*` trading API with 30+ endpoints, documented vendor creds) then declared "auth properly
+enforced, secure" on 401s and "Akamai properly blocks" on 403s → 2 LOW findings, COMPLETE. Root causes: (1)
+nothing harvested/replayed the publicly-exposed tokens; (2) coverage only required *parametered* endpoints
+probed, so auth-header APIs weren't counted; (3) 401/403 counted as "done"; (4) the AgentMail/AgentPhone
+identity layer was never driven. Built the authenticated-testing layer:
+- **`syber/scanning/credentials.py`** — harvest replayable auth material (JWT/Bearer/Basic/AWS/api-key fields/
+  documented user:pass) from any JS/doc/response; persistent engagement-wide store (survives Ralph passes);
+  `auth_headers()` emits replay variants incl. the target's CUSTOM header names (appIdKey/jwt/mwAuth/X-API-Key)
+  — verified it reproduces nuvama's `appIdKey` header from a JS blob.
+- **NEEDS_AUTH lead**: `classify_node` now maps a 401/403 (and any /api/) endpoint → AUTH_BYPASS lead with
+  verify kinds `auth_retest, http_verb_tampering, data_extraction`. Coverage counts ALL api endpoints (not
+  just parametered) + a new `auth_retest` remaining item for any 401/403 not yet `auth_retested` → the loop
+  can't complete while auth-gated endpoints are untested-with-auth.
+- **`run_auth_retest`** (verify_runners) + MCP `syber_auth_retest`/`syber_harvest_credentials`/`syber_add_session`:
+  replay every harvested token/cred (bounded fan-out) against a 401/403 endpoint; 2xx+real data via exfil →
+  CONFIRMED broken-auth/token-reuse (IMPACT). Graph marker `auth_retested` (model.mark_endpoint_auth_retested).
+- **JS/doc harvesting in crawl**: every crawled body auto-harvests tokens into the store AND
+  `extract_api_paths()` pulls same-site API URLs from JS bundles/API docs → ingested as WebEndpoints (on their
+  own host) so documented/JS-referenced APIs (np.* routes) actually get probed + auth-retested.
+- **Doctrine**: syber_fleet.sh new STEP 3b "GET AUTHENTICATED then RE-TEST" (harvest tokens → auth_retest
+  every 401; AND register real accounts via provision_identity→OTP→login→add_session→retest+IDOR), don't-
+  conclude gate requires every 401/403 auth-retested; CLAUDE.md tool list updated. Planner learns auth_retest.
+- **Tests**: test_credentials.py (7) + test_auth_retest.py (broken-auth confirm, auth-holds, api-path extract,
+  coverage auth-gate) + updated exfil test. **274 pass** (8 known auth-revert). REBUILD required.
+
 *Bottom line: the platform is built, the Kali image is rebuilt, and every layer is verified
 in-container — there is no outstanding build/setup step. §7 (severity/persistence/startup) done;
 §11 added the web-app pentest layer (IDOR/BOLA + injection + PTT); §12 added ephemeral teardown

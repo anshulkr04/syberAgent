@@ -135,6 +135,25 @@ STEP 3 — Work every host, PRIORITISING the non-prod ones:
    STEP 1 (usually NOT behind the same WAF), (b) call syber_waf_fallback to reach the origin/siblings, (c)
    try the JS-named API subdomains directly. Do not grind the prod edge; go around it.
 
+STEP 3b — GET AUTHENTICATED, then RE-TEST — this is where the real bugs are. A 401 "No Auth Header" or a
+   403 is NOT "secure/enforced" — it means "I need a token." NEVER conclude an API is secure just because it
+   returns 401. Do BOTH of these:
+   (A) USE THE TOKENS THAT ARE LYING AROUND. Every JS bundle / API doc / sample payload you pulled is
+       harvested into a credential store automatically (crawl does it; or call syber_harvest_credentials
+       url=<js-or-doc>). Then for EVERY 401/403 endpoint call syber_auth_retest <url> — it replays every
+       harvested JWT/API-key/documented-cred under Authorization: Bearer AND the target's custom header
+       names (appIdKey/jwt/mwAuth/X-API-Key…). If a leaked/stale token returns real data → CONFIRMED
+       broken-auth / token-reuse (CRITICAL).
+   (B) LOG IN FOR REAL. If there is a login/signup/onboarding surface (even behind a WAF — onboarding often
+       is not): provision an identity (syber_provision_identity want_phone=true), register on the target's
+       own signup form via agent-browser, harvest the email/SMS OTP (syber_check_inbox / syber_read_sms),
+       complete login, capture the session Cookie, and register it with syber_add_session host=<h>
+       cookie="<Cookie>". Then re-run syber_auth_retest / syber_verify_data_exposure on the auth-gated
+       endpoints WITH that session — and for two accounts, test IDOR/BOLA (fetch A's object as B). The
+       documented API docs tell you the exact auth flow + sample payloads — follow them.
+   Do NOT declare any auth-gated endpoint resolved until it has been re-tested with harvested tokens AND
+   (if a login exists) a real logged-in session. syber_coverage_status lists auth_retest items still open.
+
 STEP 4 — Finish the reasoning-heavy work the engine parked for you:
    - syber_fleet_status shows 'blocked'/dead-lettered tasks (exploit, auth-bypass, crafted probes). Work
      them DIRECTLY with syber_http_request / agent-browser / syber_waf_*.
@@ -188,6 +207,8 @@ DO NOT CONCLUDE until ALL of these are true (persistence is mandatory — err to
     its JS analysed + been checked for an exposed API spec;
   - syber_leads_status shows NO open high-value lead (each is VERIFIED or genuinely EXHAUSTED with logged
     attempts);
+  - EVERY auth-gated (401/403) endpoint has been AUTH-RETESTED with harvested tokens (syber_auth_retest) AND,
+    if a login exists, with a real logged-in session — a 401 is never "secure" until you've tried to get in;
   - every published finding has a CONFIRMED reproduction (syber_verify_data_exposure returned 2xx + real
     data → a curl the operator can re-run). A finding with only an inaccessible/403 capture is NOT confirmed
     — keep working it (correct payload/headers/auth) or drop it; do not ship unconfirmed findings;

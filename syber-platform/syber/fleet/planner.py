@@ -37,7 +37,7 @@ READ_KINDS = {"subdomain_enum", "service_scan", "web_crawl", "vuln_scan", "recon
               # Phase 8 verification kinds (read-mostly probes that climb the ladder).
               "cve_lookup", "cve_verify", "tls_audit", "default_login_check",
               "exposed_artifact_check", "http_verb_tampering", "datastore_unauth_probe",
-              "service_probe", "data_extraction"}
+              "service_probe", "data_extraction", "auth_retest"}
 WRITE_KINDS = {"exploit", "priv_esc", "lateral"}
 
 # Per-kind action cost (NASim: scans cheap, exploits expensive).
@@ -49,6 +49,7 @@ _ACTION_COST = {
     "cve_lookup": 2.0, "cve_verify": 1.5, "tls_audit": 1.5, "default_login_check": 2.0,
     "exposed_artifact_check": 1.0, "http_verb_tampering": 1.5,
     "datastore_unauth_probe": 1.5, "service_probe": 2.0, "data_extraction": 1.5,
+    "auth_retest": 1.8,
     "exploit": 5.0, "priv_esc": 4.0, "lateral": 4.0,
 }
 # Info-gain bonus: scans reduce uncertainty / open new frontier (POMDP value).

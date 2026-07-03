@@ -18,9 +18,22 @@ Pure over the graph (+ optional lead registry); unit-tested with an in-memory gr
 """
 from __future__ import annotations
 
+import re
 from typing import Any
 
 _WEB_PORTS = {80, 443, 8080, 8443, 8000, 8888, 8081, 9443}
+_API_RX = re.compile(r"/(?:api|mwapi|rest|v\d+|graphql|odata|services?|gateway)/", re.IGNORECASE)
+
+
+def _is_api(url: str) -> bool:
+    return bool(_API_RX.search(url or ""))
+
+
+def _auth_gated(status: Any) -> bool:
+    try:
+        return int(status) in (401, 403)
+    except (TypeError, ValueError):
+        return False
 
 
 def _nodes(g, label: str) -> list[tuple[str, dict]]:
@@ -91,11 +104,19 @@ def engagement_coverage(graph: Any = None, leads: Any = None,
     if uncrawled:
         remaining.append({"kind": "web_crawl", "targets": uncrawled[:30], "count": len(uncrawled)})
 
-    # 4. Every parametered WebEndpoint must be probed (injection + access-control).
+    # 4. Every parametered OR API WebEndpoint must be probed (injection + access-control).
     #    A probed endpoint is marked ``probed`` on the node (set by the probe runners).
-    unprobed = [u for u, d in endpoints if d.get("params") and not d.get("probed")]
+    unprobed = [u for u, d in endpoints
+                if (d.get("params") or _is_api(u)) and not d.get("probed")]
     if unprobed:
         remaining.append({"kind": "test_endpoint", "targets": unprobed[:30], "count": len(unprobed)})
+
+    # 4b. Every auth-gated endpoint (401/403) must be AUTH-RETESTED with harvested/obtained
+    #     tokens — a 401 is "needs auth", never "secure/done". Marked ``auth_retested``.
+    auth_gated = [u for u, d in endpoints
+                  if _auth_gated(d.get("status")) and not d.get("auth_retested")]
+    if auth_gated:
+        remaining.append({"kind": "auth_retest", "targets": auth_gated[:30], "count": len(auth_gated)})
 
     # 5. Open high-value leads (from the lead registry) must be VERIFIED or EXHAUSTED.
     #    (The lead registry owns the verification lifecycle — a lead reaches EXHAUSTED

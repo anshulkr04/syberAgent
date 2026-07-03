@@ -418,6 +418,72 @@ def _verify_data_exposure(url: str, method: str = "GET",
 
 
 @mcp.tool()
+def syber_harvest_credentials(text: str = "", url: str = "") -> dict[str, Any]:
+    """Harvest replayable auth material (JWTs, Bearer/Basic tokens, API keys, documented
+    user/password pairs) from `text` (paste a JS bundle / API doc / response) or by
+    fetching `url`, into the engagement-wide credential store. These get replayed against
+    auth-gated (401/403) endpoints by syber_auth_retest. Returns the store summary."""
+    from syber.scanning import credentials as cred
+    store = cred.get_store()
+    if url:
+        try:
+            r = webapp.http_request(url, method="GET", timeout=20)
+            store.add_from_text(r.get("body", ""), source=url)
+        except Exception:  # noqa: BLE001
+            pass
+    if text:
+        store.add_from_text(text, source="operator")
+    return {"harvested_from": url or "text", **store.summary()}
+
+
+@mcp.tool()
+def syber_add_session(host: str, cookie: str) -> dict[str, Any]:
+    """Register a session Cookie captured AFTER LOGGING IN (via agent-browser / a
+    provisioned identity) so it is replayed against that host's auth-gated endpoints.
+    This is how a real logged-in session proves IDOR/broken-auth on protected data."""
+    from syber.scanning import credentials as cred
+    cred.get_store().add_cookie(host, cookie)
+    return {"stored": True, **cred.get_store().summary()}
+
+
+@mcp.tool()
+def syber_auth_retest(url: str) -> dict[str, Any]:
+    """Replay an AUTHORISED auth-gated (401/403) endpoint with EVERY harvested credential/
+    token. If a leaked/stale/low-priv token unlocks real data → CONFIRMED broken-auth /
+    token-reuse (CRITICAL). A 401 is the START of the test, never 'secure'. Harvest tokens
+    first (syber_harvest_credentials / crawl auto-harvests) and log in for session cookies."""
+    def _retest(u: str) -> dict[str, Any]:
+        from syber.scanning.active_scan import _require_authorized
+        from syber.scanning import credentials as cred
+        from syber.scanning.exfil import scan_sensitive, save_sample, is_confirmed
+        _require_authorized(urlparse(u).netloc.split(":")[0])
+        store = cred.get_store()
+        results, tried = [], 0
+        for c in store.all():
+            for hv in cred.auth_headers(c):
+                tried += 1
+                if tried > 60:
+                    break
+                try:
+                    r = webapp.http_request(u, method="GET", headers=hv, timeout=20)
+                except Exception:  # noqa: BLE001
+                    continue
+                ev = scan_sensitive(r.get("body", ""), (r.get("headers", {}) or {}).get("content-type", ""))
+                if is_confirmed(r.get("status"), ev):
+                    save_sample(u, r.get("status"), r.get("body", ""), ev, method="GET",
+                                request_headers=hv, response_headers=r.get("headers", {}),
+                                transport=r.get("transport", ""))
+                    return {"broken_auth": True, "header": next(iter(hv)), "cred_kind": c.kind,
+                            "status": r.get("status"), "summary": ev.summary(), "tried": tried,
+                            "guidance": "CONFIRMED broken auth / token reuse — CRITICAL. Publish a finding."}
+        return {"broken_auth": False, "tried": tried,
+                "guidance": ("no harvested token unlocked this endpoint. Harvest more (JS/docs), "
+                             "or LOG IN (provision identity, register, syber_add_session) and retry."
+                             if tried else "no credentials harvested yet — harvest tokens / log in first.")}
+    return _scan(_retest, url)
+
+
+@mcp.tool()
 def syber_verify_data_exposure(url: str, method: str = "GET",
                                headers: dict[str, str] | None = None,
                                cookies: str = "") -> dict[str, Any]:

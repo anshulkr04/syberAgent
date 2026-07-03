@@ -185,6 +185,49 @@ class _SurfaceParser(HTMLParser):
             self._form = None
 
 
+# Absolute URLs + API-ish path strings inside JS bundles / API docs / JSON config.
+_ABS_URL_RX = re.compile(r"""https?://[A-Za-z0-9._~:/?#\[\]@!$&'()*+,;=%-]{4,}""")
+_API_PATH_RX = re.compile(
+    r"""["'`](/(?:api|mwapi|rest|v\d+|graphql|odata|services?|gateway|auth|account|profile|"""
+    r"""user|users|order|orders|payment|trade|report|admin)/[A-Za-z0-9._~/?#\[\]@!$&%+,;=-]{1,180})["'`]""",
+    re.IGNORECASE)
+
+
+def _looks_scriptish(content_type: str, url: str, body: str) -> bool:
+    ct = (content_type or "").lower()
+    if any(t in ct for t in ("javascript", "json", "text/plain", "application/xml")):
+        return True
+    if url.lower().split("?")[0].endswith((".js", ".json", ".map", ".txt", ".xml")):
+        return True
+    # API docs are often HTML but full of endpoint strings — sniff for many api paths
+    return bool(body) and len(_API_PATH_RX.findall(body)) >= 3
+
+
+def extract_api_paths(body: str, base_url: str) -> list[str]:
+    """Pull endpoint URLs from a JS bundle / API doc / JSON config: absolute same-site
+    URLs plus API-ish relative paths resolved against the base. Deduped, same registrable
+    domain only (so we don't ingest third-party CDNs)."""
+    if not body:
+        return []
+    from urllib.parse import urljoin as _uj
+    try:
+        from .subdomains import registrable_apex
+        apex = registrable_apex(urlparse(base_url).netloc)
+    except Exception:  # noqa: BLE001
+        apex = urlparse(base_url).netloc.split(":")[0]
+    out: set[str] = set()
+    for m in _ABS_URL_RX.findall(body[:400000]):
+        h = urlparse(m).netloc.split(":")[0]
+        if h == apex or h.endswith("." + apex):
+            out.add(m.split("#")[0])
+    for m in _API_PATH_RX.findall(body[:400000]):
+        try:
+            out.add(_uj(base_url, m).split("#")[0])
+        except Exception:  # noqa: BLE001
+            continue
+    return sorted(out)
+
+
 def extract_surface(html: str, base_url: str) -> dict[str, Any]:
     """Parse links/forms/parameters out of an HTML body, resolved against base_url."""
     p = _SurfaceParser()
@@ -496,6 +539,7 @@ def crawl(target: str, max_pages: int | None = None, max_depth: int | None = Non
 
     seen: set[str] = set()
     queue: list[tuple[str, int]] = [(start, 0)]
+    queued_extra: set[str] = set()      # API paths harvested from JS/docs (probed, not crawled)
     endpoints: list[dict[str, Any]] = []
     all_forms: list[dict[str, Any]] = []
     sess = f"crawl-{uuid.uuid4().hex[:8]}"
@@ -507,12 +551,26 @@ def crawl(target: str, max_pages: int | None = None, max_depth: int | None = Non
             continue
         seen.add(norm)
         resp = http_request(norm, cookies=cookies, session=sess, timeout=timeout)
+        body = resp.get("body", "") or ""
         pu = urlparse(norm)
         ep = {"url": norm, "status": resp.get("status"),
               "params": sorted({k for k, _ in parse_qsl(pu.query)}),
               "content_type": resp.get("headers", {}).get("content-type", "")}
-        if "html" in ep["content_type"] or (resp.get("body", "") or "").lstrip()[:1] == "<":
-            surface = extract_surface(resp.get("body", ""), norm)
+        # Harvest replayable auth material from EVERY body (JS bundles / API docs leak
+        # JWTs, API keys, documented creds — the tokens we later replay against 401s).
+        try:
+            from . import credentials as _cred
+            _cred.get_store().add_from_text(body, source=norm)
+        except Exception:  # noqa: BLE001
+            pass
+        # Harvest API endpoint paths from JS bundles / API docs / JSON (the crawl can't
+        # "link" these, but they are the real API surface — feed them back to be probed).
+        if _looks_scriptish(ep["content_type"], norm, body):
+            for u in extract_api_paths(body, norm)[:200]:
+                if urlunparse(urlparse(u)._replace(fragment="")) not in seen and u not in queued_extra:
+                    queued_extra.add(u)
+        if "html" in ep["content_type"] or body.lstrip()[:1] == "<":
+            surface = extract_surface(body, norm)
             ep["params"] = sorted(set(ep["params"]) | set(surface["params"]))
             all_forms.extend(f | {"page": norm} for f in surface["forms"])
             if depth < max_depth:
@@ -524,6 +582,18 @@ def crawl(target: str, max_pages: int | None = None, max_depth: int | None = Non
     if browser_available():
         _ab(["--session", sess, "close", "--all"])
     graph = _ingest_crawl_to_graph(host, endpoints, all_forms)
+    # Ingest API paths harvested from JS/docs as WebEndpoints (on their own host) so the
+    # fleet probes + auth-retests them — this is how documented/JS-referenced APIs (the
+    # np.* trading endpoints, /partner-documentation/ routes) actually get tested.
+    try:
+        from ..graph import model as _m
+        for u in sorted(queued_extra):
+            eh = urlparse(u).netloc.split(":")[0] or host
+            _m.upsert_host(eh, source="js_api_harvest")
+            _m.upsert_web_endpoint(eh, u, method="GET",
+                                   params=sorted({k for k, _ in parse_qsl(urlparse(u).query)}))
+    except Exception:  # noqa: BLE001
+        pass
     # Synthesise likely-but-unlinked REST endpoints from the bases/entities seen,
     # so the access-control / injection probes have surface the crawl couldn't link.
     all_params = sorted({p for ep in endpoints for p in ep.get("params", [])})

@@ -111,6 +111,14 @@ def mark_vuln_verified(vid: str, verified: bool = True) -> None:
         g.add_node(vid, "Vulnerability", verified=verified)
 
 
+def mark_endpoint_auth_retested(url: str) -> None:
+    """Mark a WebEndpoint as auth-retested (replayed with harvested/obtained tokens) so
+    coverage stops treating a 401/403 as unfinished."""
+    g = get_graph()
+    if g.has(url):
+        g.add_node(url, "WebEndpoint", auth_retested=True)
+
+
 def upsert_vulnerability(target: str, vid: str, name: str | None = None, severity: str = "unknown",
                          cvss: float | None = None, source: str = "nuclei",
                          service_id: str | None = None) -> str:
