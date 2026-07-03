@@ -24,7 +24,7 @@
 # agent saying "ENGAGEMENT_COMPLETE" is NOT trusted on its own; `syber.fleet.coverage_cli`
 # is the backpressure that actually stops the loop (Ralph: completion = validation signal).
 #
-# Env: SYBER_MAX_PASSES (default 40 — a safety cap, not the normal stop), SYBER_FLEET_CONCURRENCY
+# Env: SYBER_MAX_PASSES (default 5 — each pass digs deep + carries state forward), SYBER_FLEET_CONCURRENCY
 #      (default 6), SYBER_KEEP_DATA=1 (keep backends+data on exit),
 #      SYBER_RALPH_STRICT=1 (default: stop ONLY on the objective coverage check; set 0 to also
 #      accept the agent's ENGAGEMENT_COMPLETE as a fallback stop).
@@ -38,7 +38,7 @@ for arg in "${@:2}"; do
   if [ -f "$arg" ]; then CONTEXT_FILE="$arg"; else ATTEST="$arg"; fi
 done
 ATTEST="I own and am authorised to test this target"
-MAX_PASSES="${SYBER_MAX_PASSES:-40}"
+MAX_PASSES="${SYBER_MAX_PASSES:-5}"
 RALPH_STRICT="${SYBER_RALPH_STRICT:-1}"
 CONCURRENCY="${SYBER_FLEET_CONCURRENCY:-6}"
 COMPOSE="docker compose -f infra/docker-compose.kali.yml"
@@ -149,16 +149,17 @@ STEP 6 — For each VERIFIED issue: syber_publish_finding (attack_chain + per-st
    the rung you have EVIDENCE for) then syber_gate_finding. Only CONFIRMED verdicts ship — a reflected
    payload is not execution; a claimed secret/token must appear in real tool output.
 
-STEP 7 — CONFIRM WITH A REAL REQUEST, then EMAIL THE REPORT. A finding is only real if a single crafted
-   request PROVES it. For each candidate, run syber_verify_data_exposure <url> (GET/POST with the right
-   headers) — a hit records a CONFIRMED capture (2xx + real data) under .investigation_state/evidence/, from
-   which the report auto-generates a curl reproduction + an attached verify.sh the operator can run. A
-   401/403/blocked/"Access Denied"/empty response is NOT a finding — do NOT screenshot it and call it proof;
-   either send the correct payload/headers/auth to actually reach the data, or drop it. Screenshots are
-   SUPPORTING context only, never the proof; the proof is the reproducible HTTP capture. Then call
-   syber_send_report target=${TARGET} attachments=[<optional screenshot paths of CONFIRMED exposures>] — it
-   emails the operator the report with curl repro commands + verify.sh + data samples attached. Reporting is
-   the last step; do it before finishing.
+STEP 7 — CONFIRM BY ACCESSING THE DATA, then EMAIL THE REPORT. A finding is real only if you actually
+   REACH GATED DATA. "The login page loads" or "the admin URL exists" is NOT a vulnerability — accessing the
+   data behind it is. For a login/IDOR finding you must LOG IN (provision identities, register, use the
+   session cookies) and pull the protected data; for an unauth API you must pull the real records. For each
+   candidate run syber_verify_data_exposure <url> (with the working headers/cookies) — a hit records a
+   CONFIRMED capture (2xx + real data), and the SYSTEM auto-captures a screenshot of that data (logged-in),
+   auto-rejecting any login / "Access Denied" / error page. The report then auto-generates a curl repro +
+   verify.sh + attaches ONLY confirmed proofs. A 401/403/blocked/login/empty response is NOT a finding —
+   send the correct payload/headers/auth to actually reach the data, or drop it; never present a login-page
+   or access-denied screenshot as proof (it will be ignored). Then call syber_send_report target=${TARGET}
+   — proofs are automatic and confirmed-only; you do NOT pass screenshots. Reporting is the last step.
 
 This runs as a RALPH LOOP: after you stop, an OBJECTIVE coverage check (syber_coverage_status, computed from
 the attack graph — NOT your say-so) decides whether the engagement is really done. If ANY discovered surface

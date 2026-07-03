@@ -45,38 +45,41 @@ def test_send_email_no_key(monkeypatch):
         resend.send_email("me@x.com", "s", "<p>x</p>")
 
 
-# --- Attachment collection -------------------------------------------------- #
-def test_collect_attachments_filters_dedupes_and_b64(monkeypatch, tmp_path):
+# --- Attachment collection (confirmed-tied only) ---------------------------- #
+def test_collect_attachments_confirmed_bundle_and_b64(monkeypatch, tmp_path):
+    import json as _j
     ev = tmp_path / "evidence" / "host.com"
     ev.mkdir(parents=True)
-    (ev / "shot.png").write_bytes(b"\x89PNG-bytes")
-    (ev / "sample.json").write_text('{"verdict":"REAL_DATA"}')
-    (ev / "ignore.zip").write_bytes(b"nope")          # not a proof ext -> skipped
+    (ev / "cap.json").write_text(_j.dumps({"url": "https://host.com/api", "confirmed": True,
+                                           "screenshot": str(ev / "cap.png")}))
+    (ev / "cap.body").write_bytes(b"\x89PNG-bytes")   # stand-in raw body bytes
+    (ev / "cap.png").write_bytes(b"realdata-png")
     monkeypatch.setattr(reporting, "evidence_dir", lambda: tmp_path / "evidence")
 
-    extra = tmp_path / "extra.png"
-    extra.write_bytes(b"extra")
-    atts = reporting.collect_attachments([str(extra), str(extra)])   # dup extra -> once
+    atts = reporting.collect_attachments()
     names = [a["filename"] for a in atts]
-    assert any(n.endswith("shot.png") for n in names)
-    assert any(n.endswith("sample.json") for n in names)
-    assert not any("ignore.zip" in n for n in names)
-    assert sum(1 for n in names if n.endswith("extra.png")) == 1   # dup path collapsed to one
-    # content is valid base64 of the file bytes
-    shot = next(a for a in atts if a["filename"].endswith("shot.png"))
-    assert base64.b64decode(shot["content"]) == b"\x89PNG-bytes"
+    assert any(n.endswith("cap.json") for n in names)
+    assert any(n.endswith("cap.body") for n in names)
+    assert any(n.endswith("cap.png") for n in names)
+    body = next(a for a in atts if a["filename"].endswith("cap.body"))
+    assert base64.b64decode(body["content"]) == b"\x89PNG-bytes"
 
 
 def test_collect_attachments_size_cap(monkeypatch, tmp_path):
+    import json as _j
     ev = tmp_path / "evidence"
     ev.mkdir()
     big = b"x" * (2 * 1024 * 1024)
     for i in range(10):
-        (ev / f"f{i}.body").write_bytes(big)
+        d = ev / f"h{i}"
+        d.mkdir()
+        (d / "c.json").write_text(_j.dumps({"url": f"u{i}", "confirmed": True}))
+        (d / "c.body").write_bytes(big)
     monkeypatch.setattr(reporting, "evidence_dir", lambda: ev)
     monkeypatch.setattr(reporting, "_MAX_TOTAL_BYTES", 5 * 1024 * 1024)
     atts = reporting.collect_attachments()
-    assert len(atts) <= 3                             # 5MB cap / 2MB files
+    # bodies are 2MB each; cap 5MB → at most 3 bodies (json files are tiny)
+    assert sum(1 for a in atts if a["filename"].endswith(".body")) <= 3
 
 
 # --- Report render + build/send -------------------------------------------- #

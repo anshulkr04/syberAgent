@@ -28,7 +28,7 @@ short-circuit on first find).
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 from .board import Board, Task, TaskStatus
@@ -36,9 +36,20 @@ from .board import Board, Task, TaskStatus
 __all__ = ["PersistencePolicy"]
 
 
+def _int_env(name: str, default: int) -> int:
+    import os
+    try:
+        v = int(os.environ.get(name, ""))
+        return v if v > 0 else default
+    except (ValueError, TypeError):
+        return default
+
+
 @dataclass
 class PersistencePolicy:
-    max_revivals: int = 1            # how many times a dead/blocked task may be revived
+    # More persistent by default (user request): a dead/blocked task gets several
+    # retries before it's abandoned, and deepening keeps re-opening the frontier.
+    max_revivals: int = field(default_factory=lambda: _int_env("SYBER_MAX_REVIVALS", 3))
     revive_dead: bool = True
     deepen_web: bool = True
     expand_scope: bool = True        # only ever to ALREADY-AUTHORISED siblings

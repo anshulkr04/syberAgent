@@ -75,13 +75,24 @@ def _noop_worker(task: Task, board: Board, worker_id: str) -> WorkerResult:
 # --------------------------------------------------------------------------- #
 # Budgets + stuck detection
 # --------------------------------------------------------------------------- #
+def _int_env(name: str, default: int) -> int:
+    import os
+    try:
+        v = int(os.environ.get(name, ""))
+        return v if v > 0 else default
+    except (ValueError, TypeError):
+        return default
+
+
 @dataclass
 class EngagementBudget:
     max_waves: int = 50
     max_seconds: float = 3600.0
     max_tasks: int = 2000             # total task *dispatches* across the run
     worker_lease_s: float = 900.0     # lease length per dispatched task
-    max_stall_waves: int = 3          # consecutive no-progress waves -> stop
+    # More persistent by default: tolerate more flat waves before giving up (the
+    # deepening loop may take a few waves to re-open the frontier). Env-tunable.
+    max_stall_waves: int = field(default_factory=lambda: _int_env("SYBER_MAX_STALL_WAVES", 6))
 
 
 class StuckDetector:

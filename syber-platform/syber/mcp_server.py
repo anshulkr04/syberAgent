@@ -380,8 +380,9 @@ def _verify_data_exposure(url: str, method: str = "GET",
     resp_headers = resp.get("headers", {}) or {}
     ctype = resp_headers.get("content-type", "")
     ev = scan_sensitive(body, ctype)
-    # Capture a proof SCREENSHOT only on a CONFIRMED exposure (2xx + real data) — so the
-    # attached image shows the actual exposed page/data, never a 403/inaccessible page.
+    # Capture a proof SCREENSHOT only on a CONFIRMED exposure (2xx + real data) — logged
+    # in with the same cookies (so it shows the GATED data, not a login page) and only if
+    # the rendered page is actually data (capture_screenshot rejects login/denied pages).
     shot = None
     if exfil_is_confirmed(status, ev):
         try:
@@ -391,7 +392,7 @@ def _verify_data_exposure(url: str, method: str = "GET",
             host = _re.sub(r"[^A-Za-z0-9._-]", "_", url.split("://")[-1].split("/")[0]) or "target"
             shot_dir = PATHS.state / "evidence" / host
             shot_path = str(shot_dir / f"{_t.strftime('%Y%m%dT%H%M%S')}-proof.png")
-            shot = capture_screenshot(url, shot_path)
+            shot = capture_screenshot(url, shot_path, cookies=cookies, require_data=True)
         except Exception:  # noqa: BLE001
             shot = None
     artefact = save_sample(url, status, body, ev, method=method,
@@ -443,11 +444,13 @@ def syber_send_report(target: str = "", attachments: list[str] | None = None,
     """Email the engagement report with ATTACHED PROOFS to the OPERATOR so they can verify
     each finding is real and forward it to the target organisation. The report lists every
     published finding (severity, attack chain, MITRE, evidence_refs) and attaches the actual
-    artefacts: the downloaded data samples (redacted) from syber_verify_data_exposure, plus any
-    screenshots / captures you pass in `attachments` (absolute paths). Everything in the evidence
-    dir (.investigation_state/evidence/) is attached automatically. Call this as the FINAL step,
-    after findings are published + gated. Before calling, capture agent-browser screenshots of
-    each confirmed finding and pass their paths so the operator sees concrete proof.
+    artefacts: the downloaded data samples (redacted) from syber_verify_data_exposure and the
+    confirmation screenshot the system captured (logged-in, showing the actual gated data).
+    PROOFS ARE AUTOMATIC AND CONFIRMED-ONLY: only artefacts from a CONFIRMED capture (2xx + real
+    data) are attached — the system screenshots the data itself and REJECTS login / access-denied /
+    error pages. Do NOT pass login-page or "Access Denied" screenshots; a screenshot without
+    accessed data is not proof and is ignored. `attachments` is for non-image operator files only.
+    Call this as the FINAL step, after findings are published + gated.
 
     The RECIPIENT is fixed by the operator (SYBER_REPORT_TO in the environment) — you do NOT and
     cannot choose it; the report always goes to the operator's own address. Requires RESEND_API_KEY."""

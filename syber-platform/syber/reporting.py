@@ -35,39 +35,72 @@ def evidence_dir() -> Path:
     return PATHS.state / "evidence"
 
 
-def collect_attachments(extra_paths: list[str] | None = None) -> list[dict[str, str]]:
-    """Base64 every proof file in the evidence dir + any explicit paths, deduped and
-    size-capped, in Resend attachment format {filename, content}."""
-    candidates: list[Path] = []
-    d = evidence_dir()
-    if d.is_dir():
-        candidates += sorted(p for p in d.rglob("*")
-                             if p.is_file() and p.suffix.lower() in _PROOF_EXTS)
-    for x in (extra_paths or []):
-        p = Path(x)
-        if p.is_file():
-            candidates.append(p)
+import json as _json
 
-    out: list[dict[str, str]] = []
-    seen: set[str] = set()
-    total = 0
-    for p in candidates:
-        rp = str(p.resolve())
-        if rp in seen:
-            continue
-        seen.add(rp)
+
+def _confirmed_evidence() -> list[dict[str, Any]]:
+    """Evidence JSONs whose capture is CONFIRMED (2xx + real data). Only these back a
+    finding; everything else (login pages, 403s, empty responses) is excluded from proof."""
+    d = evidence_dir()
+    out: list[dict[str, Any]] = []
+    if not d.is_dir():
+        return out
+    for p in sorted(d.rglob("*.json")):
         try:
-            data = p.read_bytes()
+            ev = _json.loads(p.read_text())
         except Exception:  # noqa: BLE001
             continue
-        if total + len(data) > _MAX_TOTAL_BYTES:
-            continue
-        total += len(data)
-        # namespace the filename with its parent (host) dir so proofs don't collide
-        name = f"{p.parent.name}__{p.name}" if p.parent != d else p.name
-        out.append({"filename": name, "content": base64.b64encode(data).decode()})
-        if len(out) >= _MAX_ATTACHMENTS:
-            break
+        if ev.get("confirmed"):
+            ev["_json_path"] = str(p)
+            out.append(ev)
+    return out
+
+
+def _attach_file(path: Path, base_dir: Path, out: list, seen: set, total: list) -> None:
+    rp = str(path.resolve())
+    if rp in seen or not path.is_file():
+        return
+    seen.add(rp)
+    try:
+        data = path.read_bytes()
+    except Exception:  # noqa: BLE001
+        return
+    if total[0] + len(data) > _MAX_TOTAL_BYTES or len(out) >= _MAX_ATTACHMENTS:
+        return
+    total[0] += len(data)
+    name = f"{path.parent.name}__{path.name}" if path.parent != base_dir else path.name
+    out.append({"filename": name, "content": base64.b64encode(data).decode()})
+
+
+def collect_attachments(extra_paths: list[str] | None = None) -> list[dict[str, str]]:
+    """Attach ONLY confirmed-tied proofs (Resend format {filename, content}): for each
+    CONFIRMED capture (2xx + real data) — its evidence JSON, the raw response body, and
+    its data-verified screenshot (captured logged-in; login/denied/error pages are
+    rejected by capture_screenshot before they're ever saved).
+
+    Agent-supplied `extra_paths` screenshots are DELIBERATELY IGNORED: they were the
+    source of the login-page / "Access Denied" images that prove nothing. The only
+    screenshots that ship are the ones the system itself captured against verified data.
+    (Non-image operator files are still allowed through.)"""
+    d = evidence_dir()
+    out: list[dict[str, str]] = []
+    seen: set[str] = set()
+    total = [0]
+    confirmed = _confirmed_evidence()
+    for ev in confirmed:
+        jp = Path(ev["_json_path"])
+        _attach_file(jp, d, out, seen, total)                       # the evidence summary
+        _attach_file(jp.with_suffix(".body"), d, out, seen, total)  # the raw data returned
+        shot = ev.get("screenshot")
+        if shot:
+            _attach_file(Path(shot), d, out, seen, total)           # the data-verified screenshot
+    # operator-supplied NON-IMAGE files may ride along when real confirmed evidence exists;
+    # images are never taken on trust (that's what capture-on-confirmation is for).
+    if confirmed:
+        for x in (extra_paths or []):
+            p = Path(x)
+            if p.suffix.lower() not in {".png", ".jpg", ".jpeg", ".gif", ".webp"}:
+                _attach_file(p, d, out, seen, total)
     return out
 
 

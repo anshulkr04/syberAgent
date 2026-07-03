@@ -34,7 +34,39 @@ from hashlib import blake2b
 from pathlib import Path
 from typing import Any
 
-__all__ = ["DataEvidence", "scan_sensitive", "redact", "save_sample", "luhn_valid", "is_confirmed"]
+__all__ = ["DataEvidence", "scan_sensitive", "redact", "save_sample", "luhn_valid",
+           "is_confirmed", "is_gated_page"]
+
+# A page that PROVES nothing: a login/auth wall, an access-denied/WAF block, or an error.
+# A screenshot/capture of one of these is NOT evidence of a vulnerability.
+_GATED_RX = re.compile(
+    r"access denied|forbidden|not authorized|unauthorized|401 |403 |"
+    r"sign in|log ?in to (?:your|continue)|please (?:log ?in|sign in|authenticate)|"
+    r"session (?:expired|timed out)|enter your (?:password|credentials|user)|"
+    r"authentication required|just a moment|attention required|cloudflare|"
+    r"captcha|are you (?:a )?human|verify you are|request blocked|"
+    r"page not found|404 not found|error 40[0-9]", re.IGNORECASE)
+# Signals a real logged-in / data-bearing view.
+_LOGGED_IN_RX = re.compile(
+    r"log ?out|sign ?out|my account|dashboard|welcome,? |account number|"
+    r"balance|portfolio|profile|settings|holdings|transactions", re.IGNORECASE)
+
+
+def is_gated_page(body: str | None, status: int | None = None) -> bool:
+    """True if the page is a login/auth wall, access-denied/WAF block, or error — i.e.
+    it does NOT show accessible data and must not be used as proof of a finding."""
+    try:
+        if status is not None and not (200 <= int(status) < 300):
+            return True
+    except (TypeError, ValueError):
+        pass
+    text = (body or "")[:20000]
+    if not text.strip():
+        return True
+    # a login/denied marker with no logged-in/data marker ⇒ gated
+    if _GATED_RX.search(text) and not _LOGGED_IN_RX.search(text):
+        return True
+    return False
 
 # Bodies larger than this are not scanned in full (head sample) — keeps it cheap.
 _SCAN_CAP = 200_000

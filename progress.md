@@ -1180,6 +1180,29 @@ re-issued identical probes), and nothing summarised prior work into the fresh-co
 259 pass (8 known auth-revert fails). REBUILD required. This closes the Ralph loop: durable graph + durable
 recall + per-pass digest = each pass provably builds forward instead of redoing the last one.
 
+### 26. Proof discipline: only accessed-data proofs; Ralph=5 + more persistence (2026-07-03)
+User's report showed screenshots of LOGIN pages / "Access Denied" — proving nothing ("accessing a login page
+is not a vuln; logging in and showing the data IS"). Also wanted Ralph=5 passes + more persistence. (Note:
+their report was the OLD pre-rebuild format — image wasn't rebuilt with §23-25.) Fixes:
+- **Gated-page detector** (`exfil.is_gated_page`): login/auth-wall / access-denied / WAF / error / empty /
+  non-2xx ⇒ not proof (login/denied markers with no logged-in/data markers).
+- **capture_screenshot** now (a) takes `cookies` → screenshots the AUTHENTICATED view (the gated data, not the
+  login page), and (b) `require_data`: reads the DOM after load and REFUSES to save if it's a login/denied/
+  error page. `_verify_data_exposure` passes the finding's cookies + require_data=True.
+- **collect_attachments rewritten to confirmed-tied ONLY**: attaches just each CONFIRMED capture's JSON +
+  raw body + its data-verified screenshot. **Agent-supplied screenshots are IGNORED** (that was the source of
+  the login/403 images) — only system capture-on-confirmation ships; non-image operator files still allowed.
+  No confirmed evidence ⇒ no attachments.
+- Tool/doctrine: `syber_send_report` proofs are automatic + confirmed-only (don't pass screenshots); fleet
+  STEP 7 rewritten: "confirm by ACCESSING the data (log in / pull records); a login page or access-denied is
+  NOT a finding."
+- **Ralph = 5 passes** (SYBER_MAX_PASSES 40→5, each pass digs deep + carries state fwd). **More persistence**:
+  PersistencePolicy.max_revivals 1→3 (SYBER_MAX_REVIVALS), EngagementBudget.max_stall_waves 3→6
+  (SYBER_MAX_STALL_WAVES); entrypoint exports both. **Fixed** coverage_cli._load_leads path bug (was
+  fleet_checkpoint.json; coordinator writes PATHS.state/fleet/<host>.json) so open leads actually block the
+  loop's completion.
+263 pass (8 known auth-revert). REBUILD REQUIRED — critically, the user MUST rebuild to get §23-26 at all.
+
 *Bottom line: the platform is built, the Kali image is rebuilt, and every layer is verified
 in-container — there is no outstanding build/setup step. §7 (severity/persistence/startup) done;
 §11 added the web-app pentest layer (IDOR/BOLA + injection + PTT); §12 added ephemeral teardown

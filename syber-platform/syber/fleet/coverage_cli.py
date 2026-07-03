@@ -21,21 +21,37 @@ from .coverage import engagement_coverage
 
 
 def _load_leads():
-    """Best-effort: restore the lead registry from the durable coordinator checkpoint so
-    open high-value leads count against completion. Absent → graph-only coverage."""
+    """Best-effort: restore the lead registry from the durable coordinator checkpoint(s)
+    so open high-value leads count against completion. The coordinator writes one
+    checkpoint per host under PATHS.state/fleet/<host>.json with a `leads` snapshot; we
+    merge them. Absent → graph-only coverage (leads are also re-derived from the graph)."""
     try:
-        import os
         from ..config import PATHS
         from .leads import LeadRegistry
-        ckpt = PATHS.state / "fleet_checkpoint.json"
-        path = os.environ.get("SYBER_FLEET_CHECKPOINT", str(ckpt))
-        with open(path) as f:
-            data = json.load(f)
-        reg = LeadRegistry()
-        reg.restore(data.get("leads") or data.get("lead_registry") or {})
-        return reg
-    except Exception:  # noqa: BLE001 - no checkpoint / different schema -> graph-only
+    except Exception:  # noqa: BLE001
         return None
+    reg = LeadRegistry()
+    found = False
+    import os
+    override = os.environ.get("SYBER_FLEET_CHECKPOINT")
+    paths = [override] if override else []
+    fleet_dir = PATHS.state / "fleet"
+    if fleet_dir.is_dir():
+        paths += [str(p) for p in sorted(fleet_dir.glob("*.json"))]
+    for path in paths:
+        try:
+            with open(path) as f:
+                data = json.load(f)
+            snap = data.get("leads") or {}
+            # snapshot format is {"leads": [ ... ]}; restore merges into the registry
+            for ld in (snap.get("leads", []) if isinstance(snap, dict) else []):
+                from .leads import Lead
+                lead = Lead.from_dict(ld)
+                reg._leads.setdefault(lead.id, lead)
+            found = True
+        except Exception:  # noqa: BLE001
+            continue
+    return reg if found else None
 
 
 def main(argv: list[str] | None = None) -> int:

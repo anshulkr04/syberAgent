@@ -30,6 +30,8 @@ export SYBER_CRAWL_PAGES="${SYBER_CRAWL_PAGES:-150}"               # crawl up to
 export SYBER_CRAWL_DEPTH="${SYBER_CRAWL_DEPTH:-3}"                 # to depth 3
 export SYBER_NUCLEI_FULL="${SYBER_NUCLEI_FULL:-1}"                # wide nuclei tag coverage
 export SYBER_SUBDOMAIN_BRUTE="${SYBER_SUBDOMAIN_BRUTE:-1}"        # active puredns DNS brute on
+export SYBER_MAX_REVIVALS="${SYBER_MAX_REVIVALS:-3}"             # retry dead/blocked tasks up to 3× (persistence)
+export SYBER_MAX_STALL_WAVES="${SYBER_MAX_STALL_WAVES:-6}"       # tolerate 6 flat waves before giving up
 
 # --- In-network backends (docker compose service names) --------------------
 export NEO4J_URI="${NEO4J_URI:-bolt://neo4j:7687}"

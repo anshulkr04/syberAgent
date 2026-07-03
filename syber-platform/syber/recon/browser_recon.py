@@ -53,17 +53,43 @@ def browser_available() -> bool:
     return shutil.which(AB) is not None
 
 
-def capture_screenshot(url: str, out_path: str, *, wait_ms: int = 2500) -> str | None:
-    """Open `url` in real Chrome and screenshot it to `out_path`. Returns the path on
-    success, else None. Used to snapshot a CONFIRMED exposure at the moment of proof, so
-    the attached image shows the actual exposed page/data — not a stale/403 page."""
+def capture_screenshot(url: str, out_path: str, *, wait_ms: int = 2500,
+                       cookies: str | None = None, require_data: bool = True) -> str | None:
+    """Open `url` in real Chrome and screenshot it to `out_path` — a proof of a CONFIRMED
+    exposure. Returns the path on success, else None.
+
+    Two guards so the image actually PROVES something (not a login/403 page):
+      * `cookies` (a "k=v; k2=v2" header) sets the authenticated session BEFORE navigating,
+        so an auth-required finding is captured logged-in (showing the gated data) — the
+        thing the operator asked for: "logging in and showing the data is the vulnerability."
+      * `require_data`: after load, read the DOM and REFUSE to save the screenshot if it is
+        a login wall / access-denied / error page (is_gated_page). No proof beats false proof.
+    """
     if not browser_available():
         return None
     sess = f"proof-{uuid.uuid4().hex[:8]}"
     try:
         os.makedirs(os.path.dirname(out_path) or ".", exist_ok=True)
+        # Set cookies for the target origin first (so the page renders authenticated).
+        if cookies:
+            for pair in cookies.split(";"):
+                if "=" in pair:
+                    k, v = pair.split("=", 1)
+                    _ab(["--session", sess, "cookies", "set", k.strip(), v.strip(), "--url", url], timeout=20)
         _ab(["--session", sess, "open", url], timeout=60)
         _ab(["--session", sess, "wait", str(wait_ms)])
+        if require_data:
+            _rc, dom, _ = _ab(["--session", sess, "eval",
+                               "document.documentElement.innerText.slice(0,20000)"], timeout=30)
+            body = _parse_eval(dom) if dom.strip().startswith('"') else dom
+            body_text = body if isinstance(body, str) else str(body)
+            try:
+                from ..scanning.exfil import is_gated_page
+                if is_gated_page(body_text):
+                    _ab(["--session", sess, "close", "--all"])
+                    return None            # login / denied / error page — not proof
+            except Exception:  # noqa: BLE001
+                pass
         _ab(["--session", sess, "screenshot", out_path])
         _ab(["--session", sess, "close", "--all"])
         return out_path if os.path.exists(out_path) else None

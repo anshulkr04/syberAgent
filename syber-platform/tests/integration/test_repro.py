@@ -78,3 +78,59 @@ def test_reproductions_split_and_script(tmp_path):
 def test_verify_script_empty_when_nothing_confirmed():
     s = repro.build_verify_script([], target="x")
     assert "No CONFIRMED findings" in s
+
+
+# --- gated-page detector: login/403 pages are NOT proof --------------------- #
+def test_is_gated_page_rejects_login_and_denied():
+    assert exfil.is_gated_page("Please log in to your account", 200) is True
+    assert exfil.is_gated_page("<h1>Access Denied</h1>", 200) is True
+    assert exfil.is_gated_page("Attention Required! Cloudflare", 200) is True
+    assert exfil.is_gated_page("anything", 403) is True          # non-2xx is gated
+    assert exfil.is_gated_page("", 200) is True                  # empty
+    assert exfil.is_gated_page("404 Not Found", 200) is True
+
+
+def test_is_gated_page_accepts_real_data_view():
+    # a logged-in/data page passes even if it mentions 'logout'
+    assert exfil.is_gated_page('{"account_number":"12345","balance":9000}', 200) is False
+    assert exfil.is_gated_page("Welcome, Asha — Dashboard | Logout | Holdings", 200) is False
+
+
+# --- attachments: only confirmed-tied proofs ------------------------------- #
+def test_collect_attachments_only_confirmed(monkeypatch, tmp_path):
+    import json as _j
+    from syber import reporting
+    ed = tmp_path / "evidence" / "host.com"
+    ed.mkdir(parents=True)
+    # a CONFIRMED capture with body + screenshot
+    (ed / "good.json").write_text(_j.dumps({"url": "https://host.com/api/data", "confirmed": True,
+                                            "screenshot": str(ed / "good.png")}))
+    (ed / "good.body").write_text('{"email":"a@b.com"}')
+    (ed / "good.png").write_bytes(b"\x89PNGdata")
+    # an UNCONFIRMED capture (403 login page) + an arbitrary agent screenshot
+    (ed / "bad.json").write_text(_j.dumps({"url": "https://host.com/login", "confirmed": False,
+                                           "screenshot": str(ed / "bad.png")}))
+    (ed / "bad.png").write_bytes(b"loginpage")
+    (ed / "random-screenshot.png").write_bytes(b"accessdenied")
+    monkeypatch.setattr(reporting, "evidence_dir", lambda: tmp_path / "evidence")
+
+    names = [a["filename"] for a in reporting.collect_attachments([str(ed / "random-screenshot.png")])]
+    assert any(n.endswith("good.json") for n in names)
+    assert any(n.endswith("good.body") for n in names)
+    assert any(n.endswith("good.png") for n in names)
+    # the login-page screenshot + unconfirmed json are NOT attached
+    assert not any("bad" in n for n in names)
+    # an agent-supplied SCREENSHOT is never taken on trust (only capture-on-confirmation ships)
+    assert not any("random-screenshot" in n for n in names)
+
+
+def test_collect_attachments_empty_when_nothing_confirmed(monkeypatch, tmp_path):
+    import json as _j
+    from syber import reporting
+    ed = tmp_path / "evidence" / "h"
+    ed.mkdir(parents=True)
+    (ed / "x.json").write_text(_j.dumps({"url": "u", "confirmed": False}))
+    (ed / "shot.png").write_bytes(b"img")
+    monkeypatch.setattr(reporting, "evidence_dir", lambda: tmp_path / "evidence")
+    # no confirmed evidence → nothing attached, and an agent screenshot is withheld
+    assert reporting.collect_attachments([str(ed / "shot.png")]) == []
