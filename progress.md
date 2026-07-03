@@ -1203,6 +1203,15 @@ their report was the OLD pre-rebuild format — image wasn't rebuilt with §23-2
   loop's completion.
 263 pass (8 known auth-revert). REBUILD REQUIRED — critically, the user MUST rebuild to get §23-26 at all.
 
+### 27. Auto-rebuild in the engagement scripts (2026-07-03)
+User asked "will ./syber_fleet rebuild it" — it did NOT. The scripts only ran `compose up -d` + `compose run
+--rm kali`, and `docker compose run` rebuilds ONLY when the image is missing (why an earlier purge auto-built).
+Once syber-kali:latest existed, every engagement silently ran STALE code — the root cause of "my fixes aren't
+taking effect / old report format." Fixed: `syber_fleet.sh`, `syber_engage.sh`, `syber_session.sh` now
+`$COMPOSE build kali` once at startup (before `up -d`), abort on build failure, skip with SYBER_NO_BUILD=1.
+Docker layer caching → ~seconds when unchanged. This removes the recurring stale-image footgun; no separate
+manual `docker compose build` needed anymore.
+
 *Bottom line: the platform is built, the Kali image is rebuilt, and every layer is verified
 in-container — there is no outstanding build/setup step. §7 (severity/persistence/startup) done;
 §11 added the web-app pentest layer (IDOR/BOLA + injection + PTT); §12 added ephemeral teardown

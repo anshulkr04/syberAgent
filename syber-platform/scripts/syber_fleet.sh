@@ -68,6 +68,18 @@ teardown() {
 trap teardown EXIT
 trap 'echo; echo "[syber] interrupted — stopping fleet and tearing down…" >&2; exit 130' INT TERM
 
+# Rebuild the kali image so code/doctrine changes are always in the running container.
+# `docker compose run` does NOT rebuild on its own once the image exists, so without this
+# every engagement would silently run stale code. Docker layer caching makes this ~seconds
+# when nothing changed. Skip with SYBER_NO_BUILD=1.
+if [ "${SYBER_NO_BUILD:-0}" != "1" ]; then
+  echo "[syber] building kali image (cached if unchanged; SYBER_NO_BUILD=1 to skip)…"
+  if ! $COMPOSE build kali; then
+    echo "[syber] image build FAILED — aborting so we don't run stale code." >&2
+    exit 1
+  fi
+fi
+
 echo "[syber] starting backends (neo4j, postgres, kafka)…"
 $COMPOSE up -d neo4j postgres kafka
 

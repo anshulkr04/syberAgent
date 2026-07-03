@@ -27,6 +27,13 @@ teardown() {
 trap teardown EXIT
 trap 'echo; echo "[syber] interrupted — tearing down…" >&2; exit 130' INT TERM
 
+# Rebuild so the container never runs stale code (compose run won't rebuild on its own).
+# Cached ~seconds when unchanged; skip with SYBER_NO_BUILD=1.
+if [ "${SYBER_NO_BUILD:-0}" != "1" ]; then
+  echo "[syber] building kali image (cached if unchanged; SYBER_NO_BUILD=1 to skip)…"
+  $COMPOSE build kali || { echo "[syber] image build FAILED — aborting." >&2; exit 1; }
+fi
+
 echo "[syber] starting backends (neo4j, postgres, kafka)…"
 $COMPOSE up -d neo4j postgres kafka
 
