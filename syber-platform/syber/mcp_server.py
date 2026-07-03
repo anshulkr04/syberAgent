@@ -892,6 +892,22 @@ def syber_coverage_status() -> dict[str, Any]:
 
 
 @mcp.tool()
+def syber_engagement_digest() -> dict[str, Any]:
+    """Carry-forward memory: a concise summary of everything already discovered, confirmed,
+    and tried-and-exhausted across prior work, PLUS the remaining untested surface to work
+    now. Read this FIRST when resuming so you build on prior passes instead of repeating
+    them (don't re-probe what's in 'already executed', don't retry EXHAUSTED leads)."""
+    from syber.fleet.coverage import engagement_digest
+    board, _ = _fleet()
+    try:
+        from syber.graph.store import get_graph
+        graph = get_graph()
+    except Exception:  # noqa: BLE001
+        graph = None
+    return {"digest": engagement_digest(graph=graph, leads=getattr(board, "leads", None))}
+
+
+@mcp.tool()
 def syber_fleet_plan_wave(max_size: int = 6) -> dict[str, Any]:
     """Preview the next PARALLEL wave (read-only introspection): the ranked, disjoint
     (one-per-host) batch the planner would dispatch next, with each task's score. This

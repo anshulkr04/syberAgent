@@ -41,12 +41,20 @@ def _load_leads():
 def main(argv: list[str] | None = None) -> int:
     argv = argv if argv is not None else sys.argv[1:]
     quiet = "--quiet" in argv
+    digest = "--digest" in argv
     try:
         from ..graph.store import get_graph
         graph = get_graph()
     except Exception:  # noqa: BLE001
         graph = None
-    cov = engagement_coverage(graph=graph, leads=_load_leads())
+    leads = _load_leads()
+    if digest:
+        # Markdown carry-forward for the next Ralph pass (always exit 0; this is context,
+        # not the stop signal).
+        from .coverage import engagement_digest
+        print(engagement_digest(graph=graph, leads=leads))
+        return 0
+    cov = engagement_coverage(graph=graph, leads=leads)
     if not quiet:
         print(json.dumps(cov, indent=2))
     else:

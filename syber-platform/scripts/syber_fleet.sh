@@ -209,6 +209,13 @@ coverage_complete() {
   $COMPOSE run --rm -T kali python -m syber.fleet.coverage_cli --quiet </dev/null 2>/dev/null
 }
 
+# Carry-forward digest: markdown summary of what's already discovered/confirmed/tried +
+# the remaining untested surface. Injected into the NEXT pass so a fresh context builds on
+# prior work instead of repeating it (Ralph: state lives on disk, read it first).
+engagement_digest() {
+  $COMPOSE run --rm -T kali python -m syber.fleet.coverage_cli --digest </dev/null 2>/dev/null
+}
+
 MSG="$SEED"
 pass=1
 done_reason=""
@@ -239,7 +246,16 @@ while [ "$pass" -le "$MAX_PASSES" ]; do
   else
     echo "[syber] surface still has untested assets — resuming."
   fi
-  MSG="$CONTINUE"
+  # Carry the prior passes' state into this one so the fresh context builds forward.
+  echo "[syber] building carry-forward digest for the next pass…"
+  DIGEST="$(engagement_digest)"
+  if [ -n "$DIGEST" ]; then
+    MSG="${CONTINUE}
+
+${DIGEST}"
+  else
+    MSG="$CONTINUE"
+  fi
   pass=$((pass + 1))
 done
 

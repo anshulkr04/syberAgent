@@ -127,6 +127,80 @@ def engagement_coverage(graph: Any = None, leads: Any = None,
     }
 
 
+def engagement_digest(graph: Any = None, leads: Any = None, max_items: int = 25) -> str:
+    """A concise MARKDOWN carry-forward summary for the NEXT Ralph pass: what's already
+    discovered/confirmed, what leads were tried-and-exhausted (so they aren't retried),
+    what tool calls already ran (don't repeat), and — top priority — the remaining
+    untested surface to work THIS pass. This is the cross-pass memory that stops a fresh
+    context from redoing the previous pass's work."""
+    if graph is None:
+        try:
+            from ..graph.store import get_graph
+            graph = get_graph()
+        except Exception:  # noqa: BLE001
+            graph = None
+
+    lines: list[str] = ["## Carry-forward from previous passes (READ FIRST — do NOT repeat this work)"]
+
+    if graph is not None:
+        hosts = _nodes(graph, "Host")
+        eps = _nodes(graph, "WebEndpoint")
+        vulns = _nodes(graph, "Vulnerability")
+        findings = _nodes(graph, "Finding")
+        nonprod = [n for n, d in hosts if d.get("env") == "non-prod"
+                   or any(t in n for t in ("uat", "cug", "stag", "dev", "qa", "preprod"))]
+        lines.append(f"- Discovered so far: {len(hosts)} hosts ({len(nonprod)} non-prod), "
+                     f"{len(eps)} web endpoints, {len(vulns)} vulnerabilities, {len(findings)} findings.")
+        if findings:
+            lines.append("- Findings already published:")
+            for n, d in findings[:max_items]:
+                lines.append(f"    - [{d.get('severity', '?')}] {d.get('summary', n)}")
+        # confirmed data-exposure captures (from the evidence dir)
+        try:
+            from ..repro import reproductions
+            confirmed, _ = reproductions()
+            if confirmed:
+                lines.append(f"- CONFIRMED exposures (already proven — reproduced with curl): {len(confirmed)}")
+                for r in confirmed[:max_items]:
+                    lines.append(f"    - {r['url']}")
+        except Exception:  # noqa: BLE001
+            pass
+
+    # leads already tried and exhausted (do NOT retry these hypotheses)
+    if leads is not None:
+        try:
+            exhausted = [l for l in leads.all() if str(l.state) == "exhausted"]
+            if exhausted:
+                lines.append(f"- Leads already EXHAUSTED (every hypothesis tried & failed — do not retry): "
+                             f"{len(exhausted)}")
+                for l in exhausted[:max_items]:
+                    why = "; ".join(l.reflections[-2:]) if getattr(l, "reflections", None) else ""
+                    lines.append(f"    - {l.id} {('— ' + why) if why else ''}")
+        except Exception:  # noqa: BLE001
+            pass
+
+    # already-executed tool calls (recall ledger, persisted across passes)
+    try:
+        from ..scanning.recall import summarize
+        s = summarize(limit=max_items)
+        if s and "no tool calls" not in s:
+            lines.append("- " + s.replace("\n", "\n  "))
+    except Exception:  # noqa: BLE001
+        pass
+
+    # THE priority for this pass: what is still untested
+    cov = engagement_coverage(graph=graph, leads=leads)
+    if cov["complete"]:
+        lines.append("\n## Remaining THIS pass: NONE — coverage is complete. Verify & report only.")
+    else:
+        lines.append(f"\n## Remaining THIS pass ({cov['remaining_count']} untested — WORK THESE, not old ground):")
+        for r in cov["remaining"]:
+            tgts = ", ".join(str(t) for t in r.get("targets", [])[:8])
+            more = f" (+{r['count'] - 8} more)" if r["count"] > 8 else ""
+            lines.append(f"- {r['kind']}: {tgts}{more}")
+    return "\n".join(lines)
+
+
 def _is_apex(host: str) -> bool:
     try:
         from ..scanning.subdomains import registrable_apex

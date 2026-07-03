@@ -1161,6 +1161,25 @@ when the model printed ENGAGEMENT_COMPLETE. Fix = make the stop OBJECTIVE, compu
 254 pass (8 known auth-revert fails). REBUILD required (new modules + MCP tool). Security caveats honoured:
 scope allowlist + injection guard + rate limiting already in path; MAX_PASSES + teardown are the safety nets.
 
+### 25. Ralph carry-forward — build on prior passes, don't repeat (2026-07-02)
+User: across the 40 Ralph passes, carry state forward so a new pass finds NEW things instead of repeating.
+What already persisted: the attack graph (Neo4j service stays up across passes) + syber-state volume
+(fleet checkpoint, evidence). The gap: the **recall ledger was in-memory** (reset every --rm pass → agent
+re-issued identical probes), and nothing summarised prior work into the fresh-context pass. Fixes:
+- **Persistent recall ledger** (`scanning/recall.py`): loads/saves `PATHS.state/recall_ledger.json` (in the
+  shared state volume) so "already executed (tool,args)" dedup survives across passes; capacity 500→2000;
+  `SYBER_RECALL_PATH` override, empty disables. Scoped per-engagement (wiped at teardown → never a stale
+  cross-target cache). Atomic write, best-effort.
+- **Carry-forward digest** (`fleet/coverage.py::engagement_digest`): markdown for the next pass — prior
+  findings, CONFIRMED exposures (from repro), EXHAUSTED leads + why (don't retry), already-executed calls
+  (don't repeat), and TOP: the remaining untested surface to work THIS pass. `coverage_cli --digest` prints
+  it (exit 0); MCP `syber_engagement_digest` for the in-agent loop.
+- **`syber_fleet.sh`** injects the digest into each CONTINUE pass (captured from a throwaway container), so
+  every fresh context starts with "here's what's done/found/tried — work only what's left." SEED already
+  tells the agent to drive coverage `remaining` to zero.
+259 pass (8 known auth-revert fails). REBUILD required. This closes the Ralph loop: durable graph + durable
+recall + per-pass digest = each pass provably builds forward instead of redoing the last one.
+
 *Bottom line: the platform is built, the Kali image is rebuilt, and every layer is verified
 in-container — there is no outstanding build/setup step. §7 (severity/persistence/startup) done;
 §11 added the web-app pentest layer (IDOR/BOLA + injection + PTT); §12 added ephemeral teardown
