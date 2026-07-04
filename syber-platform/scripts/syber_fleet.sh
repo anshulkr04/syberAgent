@@ -211,4 +211,21 @@ if [ -n "$done_reason" ]; then
 else
   echo "[syber] reached max passes (${MAX_PASSES}) with coverage still incomplete. Raise SYBER_MAX_PASSES to allow more, or inspect syber_coverage_status."
 fi
+
+# GUARANTEED REPORT: send the email ourselves from durable state (graph findings + evidence
+# volume), regardless of what the agent did or the result. Runs BEFORE teardown wipes data.
+# Skip with SYBER_NO_REPORT=1. Retried once on a transient Resend/network hiccup.
+if [ "${SYBER_NO_REPORT:-0}" != "1" ]; then
+  echo "[syber] sending engagement report to the operator (guaranteed, from durable state)…"
+  sent=0
+  for attempt in 1 2; do
+    OUT="$($COMPOSE run --rm -T kali python -m syber.reporting --target "${TARGET}" </dev/null 2>&1)"
+    echo "$OUT"
+    case "$OUT" in
+      *"[report] sent"*) sent=1; break ;;
+      *) echo "[syber] report attempt ${attempt} did not confirm send; retrying…" >&2; sleep 3 ;;
+    esac
+  done
+  [ "$sent" = "1" ] || echo "[syber] WARNING: report email could not be confirmed sent — check RESEND_API_KEY / SYBER_REPORT_TO / verified sender domain." >&2
+fi
 echo "[syber] fleet engagement finished."

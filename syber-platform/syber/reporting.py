@@ -208,6 +208,35 @@ def render_text(findings: list[dict[str, Any]], target: str, attach_names: list[
     return "\n".join(lines)
 
 
+def _gather_findings() -> list[dict[str, Any]]:
+    """Findings from the in-process sink UNION the durable graph (Finding nodes). A
+    standalone send (fresh container, empty sink) still reports everything found across
+    all passes because the graph persists — this is why the shell can guarantee the mail."""
+    out: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for f in get_findings_sink().candidates:
+        key = (f.get("summary") or "")[:80]
+        seen.add(key)
+        out.append(f)
+    try:
+        from .graph.store import get_graph
+        g = get_graph()
+        for _, d in g.g.nodes(data=True):
+            if d.get("label") != "Finding":
+                continue
+            summ = (d.get("summary") or "")[:80]
+            if summ in seen:
+                continue
+            seen.add(summ)
+            out.append({"summary": d.get("summary", ""), "severity": d.get("severity", "INFO"),
+                        "mitre_techniques": [m for m in (d.get("mitre") or "").split(",") if m],
+                        "confidence_estimate": d.get("confidence"), "evidence_refs": [],
+                        "attack_chain": []})
+    except Exception:  # noqa: BLE001 - graph optional
+        pass
+    return out
+
+
 def build_and_send(to: str | None = None, target: str = "",
                    extra_attachments: list[str] | None = None,
                    subject: str | None = None) -> dict[str, Any]:
@@ -233,7 +262,7 @@ def build_and_send(to: str | None = None, target: str = "",
             f"The report goes only to SYBER_REPORT_TO (+ SYBER_REPORT_ALLOWED). Ignoring the "
             f"agent-supplied address.")
     recipient = configured   # always the operator's address, regardless of what the agent passed
-    findings = list(get_findings_sink().candidates)
+    findings = _gather_findings()
     attachments = collect_attachments(extra_attachments)
 
     # Reproduction: split captured evidence into confirmed (2xx + real data) vs
@@ -258,3 +287,26 @@ def build_and_send(to: str | None = None, target: str = "",
                      "Inaccessible/403 captures are listed separately as NON-findings. If it did not "
                      "arrive with the default sender, the recipient must be your Resend account email, "
                      "or set SYBER_REPORT_FROM to a verified-domain sender.")}
+
+
+def main(argv: list[str] | None = None) -> int:
+    """CLI: send the engagement report from DURABLE state (graph findings + evidence dir),
+    so the shell loop can guarantee the mail regardless of whether the agent sent it.
+    `python -m syber.reporting [--target T]`. Exit 0 on send, 1 on failure (never raises)."""
+    import argparse
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--target", default="")
+    args = ap.parse_args(argv)
+    try:
+        out = build_and_send(target=args.target)
+        print(f"[report] sent to {out.get('to')} — {out.get('finding_count')} findings, "
+              f"{out.get('reproducible_count')} reproducible, {out.get('attachment_count')} attachments"
+              f" (id={out.get('message_id')})")
+        return 0
+    except Exception as e:  # noqa: BLE001 - report failure must be visible, not fatal to teardown
+        print(f"[report] FAILED to send: {e}")
+        return 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

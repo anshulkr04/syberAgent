@@ -1286,6 +1286,23 @@ NET: fewer, deeper, impact-proven findings; the agent now has both the mandate (
 playbooks to escalate a discovery instead of filing it as noise. Research: XBOW PoC-oracle, arXiv 2506.10322/
 2601.22952/2507.00829, Bugcrowd VRT, KeyHacks/gmapsapiscanner, jwt_tool, git-dumper, PayloadsAllTheThings.
 
+### 31. GUARANTEED report email — don't depend on the agent (2026-07-04)
+User: last run's report email never arrived. Cause: sending relied on the LLM agent calling
+syber_send_report, which it skipped (printed ENGAGEMENT_COMPLETE and stopped). Fix = the SHELL guarantees it:
+- `reporting._gather_findings()` now unions the in-process sink WITH the durable graph Finding nodes, so a
+  standalone send (fresh container, empty sink) still reports everything found across all passes (graph +
+  evidence volume persist until teardown). `build_and_send` uses it.
+- `python -m syber.reporting [--target T]` CLI (`reporting.main`) — sends from durable state; never raises
+  (prints `[report] sent…`/`[report] FAILED…`, exit 0/1) so it can't block teardown.
+- `syber_fleet.sh`: after the loop ends (ANY reason — coverage complete OR max passes), BEFORE teardown wipes
+  data, always runs `compose run --rm kali python -m syber.reporting` with a 2-try retry; warns loudly if the
+  send can't be confirmed (check RESEND_API_KEY / SYBER_REPORT_TO / verified sender). `SYBER_NO_REPORT=1` to skip.
+  The agent's in-pass syber_send_report stays as belt-and-suspenders; the shell send is the guarantee.
+- Tests: durable-graph gather + CLI-never-raises; **reporting 10/10, full suite 285 pass** (8 known auth-revert).
+NOTE: delivery still needs a valid Resend config — SYBER_REPORT_TO=team@syber.sh (account email) works with the
+default sender; SYBER_REPORT_FROM=a verified syber.sh sender is required to mail ansh7026@gmail.com. The shell
+now surfaces a clear WARNING if Resend rejects, instead of silently not sending.
+
 *Bottom line: the platform is built, the Kali image is rebuilt, and every layer is verified
 in-container — there is no outstanding build/setup step. §7 (severity/persistence/startup) done;
 §11 added the web-app pentest layer (IDOR/BOLA + injection + PTT); §12 added ephemeral teardown

@@ -136,3 +136,26 @@ def test_build_and_send_requires_configured_recipient(monkeypatch):
     monkeypatch.delenv("SYBER_REPORT_TO", raising=False)
     with pytest.raises(IntegrationNotConfigured):
         reporting.build_and_send(to="anything@x.com", target="x")
+
+
+def test_gather_findings_reads_durable_graph(monkeypatch):
+    # a standalone send (empty in-process sink) still reports graph Finding nodes
+    class _Empty:
+        candidates: list = []
+    monkeypatch.setattr(reporting, "get_findings_sink", lambda: _Empty())
+    from syber.graph import model
+    model.upsert_host("acme.com")
+    model.upsert_finding({"investigation_id": "FDUR", "severity": "CRITICAL",
+                          "summary": "Durable graph finding for report",
+                          "mitre_techniques": ["T1190"], "confidence_estimate": 0.9}, host="acme.com")
+    fs = reporting._gather_findings()
+    assert any(f["summary"] == "Durable graph finding for report" and f["severity"] == "CRITICAL"
+               for f in fs)
+
+
+def test_reporting_cli_main_reports_failure_cleanly(monkeypatch):
+    # main() never raises; returns 1 and prints on failure (so teardown isn't blocked)
+    monkeypatch.delenv("SYBER_REPORT_TO", raising=False)
+    monkeypatch.setenv("RESEND_API_KEY", "re_test")
+    rc = reporting.main(["--target", "x"])
+    assert rc == 1
