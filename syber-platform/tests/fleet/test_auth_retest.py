@@ -94,3 +94,17 @@ def test_coverage_blocks_on_auth_gated_endpoint():
     g.g.nodes["https://acme.com/api/x"]["probed"] = True
     cov2 = engagement_coverage(graph=g)
     assert "auth_retest" not in {r["kind"] for r in cov2["remaining"]}
+
+
+def test_coverage_requires_login_attempt():
+    g = type("G", (), {})(); g.g = nx.DiGraph()
+    g.g.add_node("acme.com", label="Host", subdomains_enumerated=True)
+    g.g.add_node("s", label="Service", port=443); g.g.add_edge("acme.com", "s", edge_type="RUNS", port=443)
+    g.g.add_node("https://acme.com/login.aspx", label="WebEndpoint", status=200, probed=True)
+    g.g.add_edge("acme.com", "https://acme.com/login.aspx", edge_type="SERVES")
+    cov = engagement_coverage(graph=g)
+    assert "login_attempt" in {r["kind"] for r in cov["remaining"]}   # login page → must attempt login
+    # recording a login attempt (session captured or exhausted) clears it
+    g.g.nodes["acme.com"]["login_attempted"] = True
+    cov2 = engagement_coverage(graph=g)
+    assert "login_attempt" not in {r["kind"] for r in cov2["remaining"]}

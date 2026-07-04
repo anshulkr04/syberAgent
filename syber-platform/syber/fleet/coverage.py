@@ -23,10 +23,19 @@ from typing import Any
 
 _WEB_PORTS = {80, 443, 8080, 8443, 8000, 8888, 8081, 9443}
 _API_RX = re.compile(r"/(?:api|mwapi|rest|v\d+|graphql|odata|services?|gateway)/", re.IGNORECASE)
+# A login / signup / onboarding surface — the door to authenticated testing (where the
+# real bugs live). Coverage won't complete while one exists but no login was attempted.
+_LOGIN_RX = re.compile(
+    r"/(?:login|signin|sign-in|log-in|auth|account/login|sso|register|signup|sign-up|"
+    r"onboard|create-account|getstarted|\.aspx)\b|login\.|signin\.|onboarding\.", re.IGNORECASE)
 
 
 def _is_api(url: str) -> bool:
     return bool(_API_RX.search(url or ""))
+
+
+def _is_login_surface(url: str) -> bool:
+    return bool(_LOGIN_RX.search(url or ""))
 
 
 def _auth_gated(status: Any) -> bool:
@@ -117,6 +126,20 @@ def engagement_coverage(graph: Any = None, leads: Any = None,
                   if _auth_gated(d.get("status")) and not d.get("auth_retested")]
     if auth_gated:
         remaining.append({"kind": "auth_retest", "targets": auth_gated[:30], "count": len(auth_gated)})
+
+    # 4c. A login/signup/onboarding surface must have had a real LOGIN ATTEMPT (register →
+    #     OTP → login → capture session, then authenticated re-test). Recon of a login page
+    #     is NOT enough — "the login page loads" is not a result. Cleared when any host with
+    #     a login surface has a login_attempted marker (session captured or genuinely exhausted).
+    login_hosts = {h for h, _ in hosts}
+    login_surfaces = [u for u, _ in endpoints if _is_login_surface(u)]
+    if login_surfaces:
+        attempted = any(d.get("login_attempted") for _, d in hosts)
+        if not attempted:
+            remaining.append({"kind": "login_attempt",
+                              "targets": login_surfaces[:15], "count": len(login_surfaces),
+                              "note": "register+login via a provisioned identity, capture the session, "
+                                      "then re-test authenticated endpoints (IDOR/broken-auth)"})
 
     # 5. Open high-value leads (from the lead registry) must be VERIFIED or EXHAUSTED.
     #    (The lead registry owns the verification lifecycle — a lead reaches EXHAUSTED

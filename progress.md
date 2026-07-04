@@ -1239,6 +1239,53 @@ identity layer was never driven. Built the authenticated-testing layer:
 - **Tests**: test_credentials.py (7) + test_auth_retest.py (broken-auth confirm, auth-holds, api-path extract,
   coverage auth-gate) + updated exfil test. **274 pass** (8 known auth-revert). REBUILD required.
 
+### 29. Force authenticated depth; honest terminal (NOT loop-until-critical) (2026-07-03)
+Report came back shallow again (Maps key MEDIUM + missing headers LOW, Reproducible=0) — the agent did recon
+and never logged in / replayed tokens / tested the documented API. User asked to "loop until it finds a
+critical (login / data leak)." DELIBERATELY DID NOT implement literal loop-until-critical (progress §12 anti-
+pattern: against a genuinely-secure target it forces fabrication or abuse). Instead forced the *authenticated
+depth that actually yields criticals*, with an HONEST terminal:
+- **Login-attempt coverage gate** (`coverage._is_login_surface` + gate): if a login/signup/onboarding surface
+  exists but no host has a `login_attempted` marker → open `login_attempt` item; the loop can't complete on
+  recon of a login page. Cleared by `model.mark_login_attempted` (outcome session|exhausted).
+- **MCP**: `syber_add_session` now marks login_attempted(session); new `syber_login_exhausted(host, reason)`
+  = honest escape after a genuine failed attempt (no open signup / CAPTCHA / KYC wall).
+- **Ralph passes 5→12.** Doctrine (syber_fleet.sh + CLAUDE.md): STEP-3b/gate now require an ACTUAL login
+  (provision→register→OTP→add_session) or login_exhausted; "DIG FOR THE REAL BUG — missing headers/Maps key
+  are LOW noise, chase IMPACT (IDOR/broken-auth/PII/takeover)"; plus an explicit HONESTY clause — never
+  fabricate/inflate to end the loop; a thoroughly-earned "no critical" is a valid success.
+- Tests: login-gate coverage test; **275 pass** (8 known auth-revert). REBUILD via ./scripts/syber_fleet.sh
+  (auto-builds since §27).
+RATIONALE surfaced to user: refused "never stop until critical" (fabrication/abuse risk); delivered "never
+stop while authenticated surface is untested" — the legitimate lever. Still LLM-dependent: the actual
+register→login form-driving is the model's job (tools all wired); offered a deterministic login runner next.
+
+### 30. Fix the regression: deep-dive to impact, cut FP noise, slim the prompt (2026-07-04)
+User: performance regressed — used to get HIGH/CRITICAL, now only LOW noise (Maps key MEDIUM + missing
+headers) with high FP rate, and it never deep-dives (finds an API key, doesn't test where it's usable). Two
+web-research reports (FP-reduction + escalation playbooks) confirmed the causes + fix:
+- **ROOT CAUSE 1: prompt bloat.** The SEED had grown to 1,769 words of process/gates — Anthropic context-eng
+  + arXiv 2507.00829 say long checklist prompts make agents dumber/brittle (~40% variance). **Rewrote the SEED
+  to ~550 words**: goal + the ONE rule (reachability≠impact; after every discovery ask "what does this
+  unlock?" and take the next hop) + a per-finding-type deep-dive line + impact-based severity + honesty. Moved
+  mechanics into tools/skill, not prose. CONTINUE slimmed to match.
+- **ROOT CAUSE 2: the agent confuses reachability with impact.** Added deterministic **`syber/scanning/apikey.py`
+  + MCP `syber_test_api_key`**: tests a Google `AIza…` key against every billable API (geocoding/roads/
+  staticmap/streetview…) → unrestricted=finding / REQUEST_DENIED=INFO (handles the referer-bypass nuance).
+  Directly fixes the "found key, didn't test it" example. Expanded the **deep-verification skill** with
+  escalation playbooks (API key, JWT alg:none/crack/forge, Swagger→BOLA with 2 accounts, .git→use secrets,
+  login→ATO, and CHAINING lows into a critical) — the exact next-hop commands.
+- **ROOT CAUSE 3: over-suppression + noise.** Per arXiv 2601.22952 (aggressive capping drops real bugs):
+  `cap_severity` now (a) treats a CONFIRMED attack-chain step with evidence_refs (output of auth_retest/
+  verify_data_exposure) as real exploit evidence so a genuinely-proven HIGH/CRITICAL is NOT capped; (b) forces
+  pure-hygiene artefacts (missing headers/public key/banner) to INFO even if marked "confirmed" — kills the
+  LOW/MEDIUM noise. Doctrine: severity = demonstrated impact (Bugcrowd VRT/CVSS); report FEW, REAL, proven bugs.
+- Tests: test_apikey.py (8: classification + severity over-suppression/hygiene/demote cases). **283 pass**
+  (8 known auth-revert). REBUILD via ./scripts/syber_fleet.sh (auto-builds).
+NET: fewer, deeper, impact-proven findings; the agent now has both the mandate (lean prompt) and the tools/
+playbooks to escalate a discovery instead of filing it as noise. Research: XBOW PoC-oracle, arXiv 2506.10322/
+2601.22952/2507.00829, Bugcrowd VRT, KeyHacks/gmapsapiscanner, jwt_tool, git-dumper, PayloadsAllTheThings.
+
 *Bottom line: the platform is built, the Kali image is rebuilt, and every layer is verified
 in-container — there is no outstanding build/setup step. §7 (severity/persistence/startup) done;
 §11 added the web-app pentest layer (IDOR/BOLA + injection + PTT); §12 added ephemeral teardown

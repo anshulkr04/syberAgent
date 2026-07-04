@@ -228,10 +228,15 @@ after any compaction.
   concluding; verify_lead injects the matching CVE descriptions + PoC pointers),
   **verify_data_exposure** (PULL a sample from an unauthenticated endpoint and confirm it returns REAL
   sensitive data — the rung-4/CRITICAL proof; a `200`/`true` is reachability, not impact),
-  **harvest_credentials** (pull JWTs / API keys / documented creds from a JS bundle or API doc into the
-  replay store), **add_session** (register a logged-in Cookie for replay), **auth_retest** (replay every
-  harvested token/cred against a 401/403 endpoint — a leaked/stale token that returns data = CRITICAL
-  broken auth; a 401 is the START of the test, NEVER "secure").
+  **test_api_key** (DEEP-DIVE an exposed key — prove if it's unrestricted/billable; a restricted key is INFO,
+  not a finding), **harvest_credentials** (pull JWTs / API keys / documented creds from a JS bundle or API doc
+  into the replay store), **add_session** (register a logged-in Cookie for replay — also records that you logged in),
+  **login_exhausted** (honestly close the login gate only after a real failed attempt), **auth_retest**
+  (replay every harvested token/cred against a 401/403 endpoint — a leaked/stale token that returns data =
+  CRITICAL broken auth; a 401 is the START of the test, NEVER "secure"). If a login/signup surface exists you
+  MUST actually log in (provision_identity → register → OTP → add_session) and re-test authenticated — the
+  loop will not conclude on recon alone. Chase IMPACT (auth data / IDOR / broken auth / takeover), not LOW
+  noise like missing headers; but never fabricate — an honest earned negative is a valid result.
   `syber_crawl` also returns `inferred_endpoints` — synthesised REST routes the crawl couldn't link
   (e.g. `/api/v1/users/1`); probe them with `syber_test_access_control` / `syber_http_request`.
 - **Reporting:** `syber_send_report target=<t> attachments=[<screenshot paths>]` — emails the operator a

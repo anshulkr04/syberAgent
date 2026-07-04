@@ -105,12 +105,23 @@ def cap_severity(finding: dict[str, Any]) -> tuple[dict[str, Any], str | None]:
     has_exploit = bool(_EXPLOIT_RX.search(text))
     explicit = str(finding.get("exploitability", "")).lower()
     has_exploit = has_exploit or explicit in {"confirmed", "poc", "weaponized", "known-exploit", "known_exploit"}
+    # Don't OVER-SUPPRESS a genuinely-proven finding (research: aggressive capping drops real
+    # bugs). Confirmed attack-chain steps backed by evidence_refs — the output of the deep-dive
+    # tools (auth_retest / verify_data_exposure that returned real data) — ARE exploit evidence.
+    if not has_exploit:
+        for step in finding.get("attack_chain", []) or []:
+            if str(step.get("status", "")).lower() == "confirmed" and step.get("evidence_refs"):
+                has_exploit = True
+                break
+    if not has_exploit and str(finding.get("verdict", "")).upper() in ("CONFIRMED", "IMPACT"):
+        has_exploit = True
 
     new_sev, reason = sev, None
-    # Benign-only artefact inflated above INFO -> INFO.
-    if _BENIGN_RX.search(text) and not has_exploit and _RANK[sev] > _RANK["LOW"]:
-        new_sev, reason = "INFO", "benign/public artefact (e.g. public key, version banner) is not a vulnerability"
-    # HIGH/CRITICAL without exploitability evidence -> MEDIUM.
+    # Pure hygiene artefact (missing headers / public key / version banner) is NEVER a real
+    # vuln — force INFO regardless of any "confirmed" step. This kills the LOW/MEDIUM noise.
+    if _BENIGN_RX.search(text) and _RANK[sev] > _RANK["LOW"]:
+        new_sev, reason = "INFO", "hygiene/benign artefact (missing header, public key, version banner) is not a vulnerability"
+    # HIGH/CRITICAL without exploitability evidence -> MEDIUM (demote, don't drop).
     elif _RANK[sev] >= _RANK["HIGH"] and not has_exploit:
         new_sev, reason = "MEDIUM", "no concrete exploitability evidence to justify HIGH/CRITICAL"
 

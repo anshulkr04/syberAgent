@@ -418,6 +418,23 @@ def _verify_data_exposure(url: str, method: str = "GET",
 
 
 @mcp.tool()
+def syber_test_api_key(key: str) -> dict[str, Any]:
+    """DEEP-DIVE an exposed API key: prove whether it is actually UNRESTRICTED and abusable
+    (don't just report that a key exists). For a Google `AIza…` key it calls each billable
+    Google API (geocoding/directions/places/roads/staticmap/streetview…) and reports which
+    accept it — an accepted call = quota/billing abuse charged to the target. A key that is
+    REQUEST_DENIED everywhere is RESTRICTED = harmless (INFO), not a finding. Static-Maps/
+    Street-View ignore referer restrictions, so a key 'restricted' in the JS API can still be
+    billable there. Returns {unrestricted, severity, usable_apis, summary}."""
+    from syber.scanning import apikey
+    if not apikey.is_google_key(key):
+        return {"provider": "unknown", "note": "not a Google AIza key — decode/test it against its "
+                "own provider (JWT→syber_auth_retest/jwt_tool; cloud key→its API). A key is only a "
+                "finding once you prove it grants access; a restricted/inert key is INFO."}
+    return apikey.test_google_key(key).to_dict()
+
+
+@mcp.tool()
 def syber_harvest_credentials(text: str = "", url: str = "") -> dict[str, Any]:
     """Harvest replayable auth material (JWTs, Bearer/Basic tokens, API keys, documented
     user/password pairs) from `text` (paste a JS bundle / API doc / response) or by
@@ -443,7 +460,26 @@ def syber_add_session(host: str, cookie: str) -> dict[str, Any]:
     This is how a real logged-in session proves IDOR/broken-auth on protected data."""
     from syber.scanning import credentials as cred
     cred.get_store().add_cookie(host, cookie)
+    try:
+        from syber.graph import model
+        model.mark_login_attempted(host, outcome="session")   # clears the login_attempt gate
+    except Exception:  # noqa: BLE001
+        pass
     return {"stored": True, **cred.get_store().summary()}
+
+
+@mcp.tool()
+def syber_login_exhausted(host: str, reason: str) -> dict[str, Any]:
+    """HONEST escape for the login gate: record that registration/login on `host` was
+    genuinely attempted and could not be completed (no open signup, hard CAPTCHA, KYC
+    wall, etc.). Only call this AFTER a real attempt — not to skip the work. This lets the
+    engagement conclude without a login when login is truly impossible."""
+    try:
+        from syber.graph import model
+        model.mark_login_attempted(host, outcome="exhausted")
+    except Exception:  # noqa: BLE001
+        pass
+    return {"host": host, "login_outcome": "exhausted", "reason": reason}
 
 
 @mcp.tool()

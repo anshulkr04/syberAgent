@@ -78,6 +78,28 @@ This is the rung-2→4 jump operators most often skip: an endpoint returns `200`
 - **Rung discipline:** a confirmed sensitive sample = rung 4 / CRITICAL. Structured records but no classified PII = rung 3 / HIGH (unauth data exposure). `MonitorDB → true`, an empty array, or an HTML page = rung 2 (reachable), **not** impact — try a real data route or stop inflating.
 - Exfiltrate **only the one sample needed to prove access** (the tool caps + redacts automatically); never bulk-dump.
 
+## Escalate EVERY finding to impact — "what does this unlock?"
+Reachability is not a finding; impact is. After each discovery, take the next hop until you PROVE impact or genuinely exhaust it. Severity = the impact at the END of the chain.
+
+### Exposed API key (`AIzaSy…` Google, or any key)
+- `syber_test_api_key <key>` — calls each billable Google API (geocoding/directions/places/roads/staticmap/streetview). **200 with real data/PNG = unrestricted = billing abuse; `REQUEST_DENIED` everywhere = restricted = INFO, drop it.** Static-Maps/Street-View ignore referer restrictions, so they can be billable even when the JS API says "restricted".
+- Other keys: test against their own provider — AWS (`aws sts get-caller-identity`), Firebase, Stripe, SendGrid (see KeyHacks). A key is a finding only once you prove access.
+
+### JWT / token
+- Decode (header+payload): `alg`, `exp`, claims (`role`/`admin`/`user_id`). Then attack: `jwt_tool <JWT> -X a` (alg:none), `-C -d rockyou.txt` (crack HMAC → `hashcat -m 16500`), `-X k -pk public.pem` (RS256→HS256 confusion), forge an admin claim and replay. Server accepts a forged token → CRITICAL auth bypass/ATO. Also: does an expired/other-user's token still work? (replay) `syber_auth_retest <url>` replays harvested tokens automatically.
+
+### Leaked endpoint / Swagger / API docs
+- Walk every route. Unauth: hit with no `Authorization` (200 with data = broken auth). **BOLA/IDOR (highest value): two accounts A & B — request B's object with A's token; A's token returns B's PII = confirmed.** Mass assignment: append `"is_admin":true`/`"role":"admin"` to an update, then re-fetch to prove it stuck. Hidden params: `arjun`.
+
+### .git / .env / config / source maps
+- `git-dumper https://t/.git/ ./loot` → `trufflehog`/`gitleaks` (incl. deleted history). `.js.map` → `sourcemapper` for clean source + hidden endpoints. **Then USE every secret** (`aws sts get-caller-identity`, DB connect, call the API) — a validated secret is CRITICAL; an inert one is Low.
+
+### Login / registration
+- Actually register two accounts (provision identity → OTP → `syber_add_session`). Then: password-reset host-header injection (`Host: attacker.com` → token to you), reset-token/OTP in response, IDOR reset (`{"email":"victim"}` while authed as A), param pollution (`email=victim&email=attacker`), email-change ATO. Confirmed ATO = you hold a victim session. Then run BOLA/mass-assignment above.
+
+### Chain lows into a critical
+`.env` (Low) → signing secret → forge admin JWT → admin route from the leaked swagger = one CRITICAL, not three Lows. After every confirmed artefact, immediately attempt the next hop with it.
+
 ## Safe-verification discipline
 - **Do:** read-only file-disclosure proofs, OAST/DNS callbacks (no shell), version+behaviour
   correlation, single marker-named artifacts (cleaned up), curated low-rate default-cred checks.

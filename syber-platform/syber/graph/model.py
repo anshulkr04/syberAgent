@@ -119,6 +119,14 @@ def mark_endpoint_auth_retested(url: str) -> None:
         g.add_node(url, "WebEndpoint", auth_retested=True)
 
 
+def mark_login_attempted(host: str, outcome: str = "attempted") -> None:
+    """Record that a real login/registration was attempted on a host (outcome:
+    'session' = logged in & captured a session; 'exhausted' = genuinely could not).
+    Coverage won't complete while a login surface exists but no attempt is recorded."""
+    g = get_graph()
+    g.add_node(host, "Host", hostname=host, login_attempted=True, login_outcome=outcome)
+
+
 def upsert_vulnerability(target: str, vid: str, name: str | None = None, severity: str = "unknown",
                          cvss: float | None = None, source: str = "nuclei",
                          service_id: str | None = None) -> str:
