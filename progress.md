@@ -1303,6 +1303,31 @@ NOTE: delivery still needs a valid Resend config — SYBER_REPORT_TO=team@syber.
 default sender; SYBER_REPORT_FROM=a verified syber.sh sender is required to mail ansh7026@gmail.com. The shell
 now surfaces a clear WARNING if Resend rejects, instead of silently not sending.
 
+### 32. Systematic debug: why runs stop in ~15min finding nothing (2026-07-06)
+User run: 2005 tasks/253 waves in 15-20min → "no findings"; output showed `auth_retest` crash + "all HTTP
+tools blocked by CloudFront". Debugged (reproduce→isolate→root-cause→fix→verify); THREE real bugs:
+- **BUG 1 (crash): `syber_auth_retest` NameError `urlparse`** — the MCP tool's `_retest` closure used urlparse
+  but it was only imported locally inside OTHER functions. Every call crashed → the authenticated deep-dive
+  was 100% dead (this is why nothing was found). Fixed: local import in the closure. pyflakes now clean across
+  all new modules (confirms no other undefined-name bugs).
+- **BUG 2 (root cause of "not using browser to assess"): `_browser_fetch` used synchronous XHR**, which does
+  NOT solve a CloudFront/Akamai JS challenge — the XHR just receives the 403 interstitial, so "browser mode"
+  returned 403 on protected paths and the agent never saw real content. Fix: `_browser_render()` — on a
+  challenge/403/blocked (`_looks_blocked`) or XHR failure, NAVIGATE to the URL, let the challenge auto-solve,
+  read the rendered DOM (outerHTML) and return THAT as the body. Now http_request/crawl actually get past the
+  WAF and assess content.
+- **BUG 3 (why it stops early): coverage completed on a mechanically-covered but UNPENETRATED surface** — the
+  tools "ran" (scanned/crawled even when 403'd) so complete=true after 1 pass. Not fixed with another gate
+  (over-gating caused prior regressions); Bug 2's content fix is the lever — once pages render past the WAF,
+  crawl finds real endpoints so coverage has genuine work and won't trivially complete.
+- Doctrine: added "ASSESS WITH THE REAL BROWSER" (navigate+render past a challenge; if EVERY host blocks even
+  the real browser → IP/egress-blocked, say so as a coverage limitation, NOT "target is secure").
+- Tests: test_browser_render.py (_looks_blocked). **288 pass** (8 known auth-revert). REBUILD via the script.
+HONEST NOTE to user: part of the "no critical" may also be that the target hardened since the earlier run
+(UAT now behind Akamai 403) — but with auth_retest crashing + XHR not solving challenges, the authenticated
+surface was never actually tested, so the prior "no critical" was NOT trustworthy. These fixes restore the
+ability to test it.
+
 *Bottom line: the platform is built, the Kali image is rebuilt, and every layer is verified
 in-container — there is no outstanding build/setup step. §7 (severity/persistence/startup) done;
 §11 added the web-app pentest layer (IDOR/BOLA + injection + PTT); §12 added ephemeral teardown

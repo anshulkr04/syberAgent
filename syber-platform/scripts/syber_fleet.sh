@@ -123,6 +123,12 @@ THE ONE RULE THAT MATTERS — reachability is NOT a finding; IMPACT is. After EV
     one CRITICAL, not three LOWs. Severity is the impact at the END of the chain.
   The deep-verification skill has the exact commands per case — read it. A WAF 403 on prod is expected: pivot
   to non-prod subdomains / the origin (syber_waf_fallback) / JS-named API hosts. Never conclude on a 403.
+  ASSESS WITH THE REAL BROWSER: when the HTTP client / an XHR gets a CloudFront/Akamai 403 or challenge, that
+  is NOT the page — drive agent-browser to NAVIGATE to the URL, let the JS challenge auto-solve, and read the
+  rendered DOM (agent-browser open <url>; wait; get the HTML). syber_http_request now auto-renders on a
+  challenge, but for anything blocked, use agent-browser directly to see the real content before deciding.
+  If even the real browser is blocked on EVERY host (challenge never clears), you are IP/egress-blocked from
+  this container — say so explicitly as a coverage limitation; do NOT report that as "the target is secure".
 
 SEVERITY = demonstrated impact (Bugcrowd VRT / CVSS): RCE, auth bypass, IDOR exposing others' data, an
 unrestricted key with real abuse, secrets that actually authenticate = HIGH/CRITICAL. Missing headers,

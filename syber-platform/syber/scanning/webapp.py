@@ -371,10 +371,54 @@ def _browser_fetch(url: str, method: str, headers: dict[str, str], body: str | N
     )
     rc, out, _ = _ab(["--session", session, "eval", js], timeout=timeout)
     parsed = _parse_eval(out)
-    if not parsed or "status" not in parsed:
+    if parsed and "status" in parsed:
+        res = {"status": parsed.get("status"), "headers": _parse_raw_headers(parsed.get("headers", "")),
+               "body": parsed.get("body", ""), "length": parsed.get("len", 0), "transport": "browser"}
+        # A sync-XHR does NOT solve a CloudFront/Akamai JS challenge — it just receives the
+        # 403 interstitial. If that happened, NAVIGATE to the page and read the rendered DOM
+        # (which auto-solves the challenge) so we can actually assess the content.
+        if method.upper() == "GET" and _looks_blocked(res.get("status"), res.get("body", "")):
+            rendered = _browser_render(url, session, timeout)
+            if rendered is not None:
+                return rendered
+        return res
+    # XHR failed entirely — fall back to navigate+render for a GET.
+    if method.upper() == "GET":
+        return _browser_render(url, session, timeout)
+    return None
+
+
+def _looks_blocked(status: int | None, body: str) -> bool:
+    """A WAF challenge / block page rather than real content."""
+    try:
+        if status is not None and int(status) in (403, 429, 503):
+            return True
+    except (TypeError, ValueError):
+        pass
+    b = (body or "")[:4000].lower()
+    return any(m in b for m in ("just a moment", "attention required", "cloudflare",
+                                "cf-chl", "/cdn-cgi/challenge", "access denied",
+                                "request unsuccessful", "akamai", "reference #"))
+
+
+def _browser_render(url: str, session: str, timeout: int) -> dict[str, Any] | None:
+    """Navigate the REAL browser to `url`, let the JS challenge auto-solve, and return the
+    rendered DOM as the body. This is how we assess content behind CloudFront/Akamai — a
+    sync-XHR can't solve the interstitial, a real navigation can."""
+    _ab(["--session", session, "open", url], timeout=min(timeout, 60))
+    _ab(["--session", session, "wait", "3500"])          # let the challenge solve + render
+    rc, out, _ = _ab(["--session", session, "eval",
+                      "JSON.stringify({html:document.documentElement.outerHTML.slice(0,120000),"
+                      "url:location.href,title:document.title})"], timeout=timeout)
+    parsed = _parse_eval(out)
+    if not parsed or not parsed.get("html"):
         return None
-    return {"status": parsed.get("status"), "headers": _parse_raw_headers(parsed.get("headers", "")),
-            "body": parsed.get("body", ""), "length": parsed.get("len", 0), "transport": "browser"}
+    html = parsed.get("html", "")
+    if _looks_blocked(None, html) and len(html) < 3000:
+        return None                                      # still just a challenge page
+    return {"status": 200, "headers": {"content-type": "text/html"}, "body": html,
+            "length": len(html), "transport": "browser-render",
+            "final_url": parsed.get("url"), "title": parsed.get("title")}
 
 
 def _parse_raw_headers(raw: str) -> dict[str, str]:

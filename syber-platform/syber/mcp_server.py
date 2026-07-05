@@ -489,6 +489,7 @@ def syber_auth_retest(url: str) -> dict[str, Any]:
     token-reuse (CRITICAL). A 401 is the START of the test, never 'secure'. Harvest tokens
     first (syber_harvest_credentials / crawl auto-harvests) and log in for session cookies."""
     def _retest(u: str) -> dict[str, Any]:
+        from urllib.parse import urlparse
         from syber.scanning.active_scan import _require_authorized
         from syber.scanning import credentials as cred
         from syber.scanning.exfil import scan_sensitive, save_sample, is_confirmed
