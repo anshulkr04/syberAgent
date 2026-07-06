@@ -486,6 +486,45 @@ def _mark_auth_retested(url: str) -> None:
         pass
 
 
+def run_bypass_403(task: Task, board: Board, wid: str) -> WorkerResult:
+    """Systematic 401/403 bypass on an access-blocked endpoint: IP-trust headers, path
+    normalization, method fuzzing, and the harvested Vercel bypass secret — detected by
+    diffing against the baseline block page. A win flips 403→2xx with real content =
+    access-control bypass (VERIFIED). Bounded mutation count to limit traffic."""
+    target = task.target_id
+    if not _authorized(target):
+        return WorkerResult(status="failed", note="not authorised")
+    url = getattr(task, "url", "") or _url_for(target)
+    lid = _lead_id(task)
+    try:
+        from ..scanning import bypass403, webapp
+        from ..scanning import credentials as cred
+    except Exception as e:  # noqa: BLE001
+        return WorkerResult(status="failed", note=f"import failed: {e}")
+    secret_text = " ".join(
+        f"x-vercel-protection-bypass={c.value}" for c in cred.get_store().all()
+        if c.name.lower() == "x-vercel-protection-bypass")
+
+    def fetch(u, method="GET", headers=None):
+        try:
+            return webapp.http_request(u, method=method, headers=headers or None, timeout=15)
+        except Exception:  # noqa: BLE001
+            return {"status": None, "body": "", "headers": {}}
+
+    r = bypass403.run_bypass403(url, fetch, harvested_text=secret_text, max_mutations=80)
+    if r.bypassed and r.winner:
+        _ingest_vuln(url, "403-bypass", name=f"403/401 access-control bypass ({url})",
+                     severity="high", source="bypass_403")
+        _record(board, lid, "bypass_403", success=True,
+                evidence=f"bypassed {r.baseline_status}->{r.winner['status']} via {r.winner['label']}",
+                rung=EvidenceRung.VERIFIED)
+        return WorkerResult(status="done", result_ref=f"bypass_403:{url}",
+                            note=f"403 BYPASSED via {r.winner['label']}")
+    _record(board, lid, "bypass_403", success=False,
+            note=f"no 403 bypass ({r.tried} mutations tried)")
+    return WorkerResult(status="done", note=f"no bypass ({r.tried} tried)")
+
+
 def run_service_probe(task: Task, board: Board, wid: str) -> WorkerResult:
     """Service-specific deep probe. Dispatches by product to the right verification.
     Keycloak: fingerprint + default-cred admin token grant (the failure-case fix)."""
@@ -542,4 +581,5 @@ def verify_runners() -> dict[str, Any]:
         "service_probe": run_service_probe,
         "data_extraction": run_data_extraction,
         "auth_retest": run_auth_retest,
+        "bypass_403": run_bypass_403,
     }

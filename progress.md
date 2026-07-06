@@ -1350,6 +1350,31 @@ contradiction), and the loop burned all 12 passes on 1573 non-resolving "ghost" 
 - Tests: test_fp_fixes.py (11: careers/weak/strong/dump/api-key classification, wildcard-ghost drop, repro
   reconciliation). **298 pass** (8 known auth-revert). REBUILD via ./scripts/syber_fleet.sh.
 
+### 34. Autonomous 401/403 bypass engine + Vercel bypass (2026-07-06)
+User: many targets are WAF'd (Vercel 403); researched bypass on web (5 cross-validated sources: Vercel
+firewall docs, Trend Micro/penligent Vercel-breach analyses, nomore403, XFFenum, Vidoc/PortSwigger 403
+guides). Validated findings: (1) Vercel WAF is edge-level/payload-resistant, BUT `x-vercel-protection-bypass`
+secret (= VERCEL_AUTOMATION_BYPASS_SECRET, leaks into JS/env) skips deployment-protection + bot-protection +
+system mitigations — high-yield & automatable; (2) generic 403s (nginx/IP-allowlist) fall to header injection
++ path normalization + method fuzzing, detected by diffing vs the baseline block page (nomore403 method);
+(3) true Cloudflare/Akamai JS challenges still need browser-render/TLS-impersonation/origin-pivot (already
+built). Implemented the missing systematic layer:
+- **`syber/scanning/bypass403.py`** — pure mutation builders (IP-trust headers X-Forwarded-For/X-Real-IP/…=
+  127.0.0.1/localhost/private; path /..;/  //  /%2e/  case  trailing  .json  ;; method POST/PUT/HEAD/OPTIONS/
+  TRACE; Vercel secret as header + ?query) + `run_bypass403(url, fetch, harvested_text)` with baseline-diff
+  success detection (`_improved`: 403→2xx AND body materially changes → real bypass, not another block page).
+- **credentials harvester** now grabs the Vercel bypass secret from JS/env (`_VERCEL_RX`).
+- **MCP `syber_bypass_403(url)`** (agent-driven, via real browser transport) + **fleet `run_bypass_403`
+  runner** wired to the AUTH_BYPASS lead class (so 401/403 leads auto-attempt bypass, bounded 80 mutations) +
+  planner READ_KINDS/cost. Doctrine (syber_fleet.sh + CLAUDE.md): call syber_bypass_403 on any 403; hunt the
+  Vercel secret in JS; try *.vercel.app preview deployments (often escape custom-domain WAF rules).
+- Honest scope stated everywhere: bypass_403 defeats app-level/IP-allowlist/Vercel-protection blocks; a real
+  edge JS challenge needs agent-browser render / syber_waf_fallback (both already exist).
+- Tests: test_bypass403.py (8: mutation coverage, Vercel-secret extraction, baseline-diff no-false-win,
+  end-to-end header + Vercel bypass). **306 pass** (8 known auth-revert). REBUILD via ./scripts/syber_fleet.sh.
+Sources: Vercel docs/protection-bypass-automation, trendmicro/penligent Vercel-breach, github devploit/
+nomore403, github vavkamil/XFFenum, blog.vidocsecurity 401-403-bypass.
+
 *Bottom line: the platform is built, the Kali image is rebuilt, and every layer is verified
 in-container — there is no outstanding build/setup step. §7 (severity/persistence/startup) done;
 §11 added the web-app pentest layer (IDOR/BOLA + injection + PTT); §12 added ephemeral teardown

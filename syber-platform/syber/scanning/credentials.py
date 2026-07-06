@@ -43,6 +43,10 @@ _FIELD_RX = re.compile(
     r"app[_-]?id[_-]?key|client[_-]?secret|session[_-]?id|jwt|ewjwt|mwauth|gauth|"
     r"authorization|bearer|token|secret|apikey))[\"']?\s*[:=]\s*[\"']([^\"'\s,;}<>&]{8,})",
     re.IGNORECASE)
+# Vercel protection-bypass secret — replay as x-vercel-protection-bypass to skip the WAF.
+_VERCEL_RX = re.compile(
+    r"(?:x-vercel-protection-bypass|vercel[_-]?automation[_-]?bypass[_-]?secret)"
+    r"['\"]?\s*[:=]\s*['\"]?([A-Za-z0-9]{20,})", re.IGNORECASE)
 # documented credential pairs: username/user/login + password/pass/pwd near each other
 _CREDPAIR_RX = re.compile(
     r"(?:user(?:name)?|login|email)[\"']?\s*[:=]\s*[\"']?([^\"'\s,;}<>&]{3,})[\s\S]{0,80}?"
@@ -114,6 +118,8 @@ def harvest(text: str | None, source: str = "") -> list[Credential]:
     for user, pwd in _CREDPAIR_RX.findall(text):
         if user and pwd and pwd.lower() not in ("password", "yourpassword", "xxxx"):
             add(Credential(kind="cred_pair", username=user, password=pwd, source=source))
+    for m in _VERCEL_RX.findall(text):
+        add(Credential(kind="field", name="x-vercel-protection-bypass", value=m, source=source))
     return out
 
 

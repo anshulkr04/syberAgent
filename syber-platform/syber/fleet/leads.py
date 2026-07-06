@@ -115,7 +115,7 @@ _CLASS_VERIFY_KINDS = {
     LeadClass.DEFAULT_CRED_SERVICE: ["default_login_check"],
     LeadClass.VERSION_CVE: ["cve_lookup", "cve_verify"],
     LeadClass.EXPOSED_SECRET: ["exposed_artifact_check", "data_extraction"],
-    LeadClass.AUTH_BYPASS: ["auth_retest", "http_verb_tampering", "data_extraction"],
+    LeadClass.AUTH_BYPASS: ["auth_retest", "bypass_403", "http_verb_tampering", "data_extraction"],
     LeadClass.INJECTION: ["test_injection", "test_access_control"],
     LeadClass.DATASTORE_UNAUTH: ["datastore_unauth_probe"],
     LeadClass.UNAUTH_STATE_CHANGE: ["service_probe", "data_extraction"],

@@ -521,6 +521,36 @@ def syber_auth_retest(url: str) -> dict[str, Any]:
 
 
 @mcp.tool()
+def syber_bypass_403(url: str) -> dict[str, Any]:
+    """Systematically try to get past a 401/403 access block on an AUTHORISED URL. Runs the
+    full bypass battery — IP-trust headers (X-Forwarded-For/X-Real-IP=127.0.0.1…), path
+    normalization (/..;/  //  /%2e/  case  trailing), HTTP-method fuzzing, and the Vercel
+    `x-vercel-protection-bypass` secret (harvested from JS/env) — through the REAL browser
+    transport, and detects a win by diffing against the baseline block page (403→2xx with
+    materially different content). Returns {bypassed, winner (the exact header/path/method
+    that worked), summary}. NOTE: this defeats app-level/nginx/IP-allowlist/Vercel-protection
+    403s; a true Cloudflare/Akamai JS challenge needs agent-browser render or syber_waf_fallback."""
+    def _run(u: str) -> dict[str, Any]:
+        from syber.scanning.active_scan import _require_authorized
+        from syber.scanning import bypass403, credentials as cred
+        from urllib.parse import urlparse
+        _require_authorized(urlparse(u).netloc.split(":")[0])
+        # mine any harvested Vercel secret from the credential store
+        secret_text = " ".join(
+            f"x-vercel-protection-bypass={c.value}" for c in cred.get_store().all()
+            if c.name.lower() == "x-vercel-protection-bypass")
+        def fetch(fu, method="GET", headers=None):
+            return webapp.http_request(fu, method=method, headers=headers or None, timeout=20)
+        r = bypass403.run_bypass403(u, fetch, harvested_text=secret_text)
+        out = r.to_dict()
+        if r.bypassed and r.winner:
+            out["guidance"] = ("BYPASSED — now re-run your data/auth checks (syber_verify_data_exposure / "
+                               "syber_auth_retest) using the winning header/path/method to reach the real content.")
+        return out
+    return _scan(_run, url)
+
+
+@mcp.tool()
 def syber_verify_data_exposure(url: str, method: str = "GET",
                                headers: dict[str, str] | None = None,
                                cookies: str = "") -> dict[str, Any]:
