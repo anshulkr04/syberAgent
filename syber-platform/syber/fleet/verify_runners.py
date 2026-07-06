@@ -385,7 +385,7 @@ def run_data_extraction(task: Task, board: Board, wid: str) -> WorkerResult:
     body = resp.get("body", "")
     resp_headers = resp.get("headers", {}) or {}
     ctype = resp_headers.get("content-type", "")
-    ev = scan_sensitive(body, ctype)
+    ev = scan_sensitive(body, ctype, url=url)
     artefact = save_sample(url, status, body, ev, method="GET",
                            response_headers=resp_headers, transport=resp.get("transport", ""))
 
@@ -457,7 +457,7 @@ def run_auth_retest(task: Task, board: Board, wid: str) -> WorkerResult:
             status = r.get("status")
             body = r.get("body", "")
             ctype = (r.get("headers", {}) or {}).get("content-type", "")
-            ev = scan_sensitive(body, ctype)
+            ev = scan_sensitive(body, ctype, url=url)
             if is_confirmed(status, ev):
                 hdr_name = next(iter(hv))
                 artefact = save_sample(url, status, body, ev, method="GET",

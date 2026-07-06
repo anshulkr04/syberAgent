@@ -379,7 +379,7 @@ def _verify_data_exposure(url: str, method: str = "GET",
     body = resp.get("body", "")
     resp_headers = resp.get("headers", {}) or {}
     ctype = resp_headers.get("content-type", "")
-    ev = scan_sensitive(body, ctype)
+    ev = scan_sensitive(body, ctype, url=url)
     # Capture a proof SCREENSHOT only on a CONFIRMED exposure (2xx + real data) — logged
     # in with the same cookies (so it shows the GATED data, not a login page) and only if
     # the rendered page is actually data (capture_screenshot rejects login/denied pages).
@@ -505,7 +505,7 @@ def syber_auth_retest(url: str) -> dict[str, Any]:
                     r = webapp.http_request(u, method="GET", headers=hv, timeout=20)
                 except Exception:  # noqa: BLE001
                     continue
-                ev = scan_sensitive(r.get("body", ""), (r.get("headers", {}) or {}).get("content-type", ""))
+                ev = scan_sensitive(r.get("body", ""), (r.get("headers", {}) or {}).get("content-type", ""), url=u)
                 if is_confirmed(r.get("status"), ev):
                     save_sample(u, r.get("status"), r.get("body", ""), ev, method="GET",
                                 request_headers=hv, response_headers=r.get("headers", {}),

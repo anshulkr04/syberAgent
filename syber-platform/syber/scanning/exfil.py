@@ -187,14 +187,35 @@ def _count_records(body: str, content_type: str) -> int:
     return len(lines)
 
 
-def scan_sensitive(body: str | None, content_type: str = "") -> DataEvidence:
-    """Classify a response body. PURE — no network, no disk. The single source of
-    truth for "is there real data here?"."""
+# URL paths that serve intentionally-PUBLIC content — a phone/email here is NOT a leak.
+_PUBLIC_CONTENT_RX = re.compile(
+    r"/(?:careers?|jobs?|hiring|vacan|blog|news|press|media|about|team|people|"
+    r"contact|support|help|faq|docs?|documentation|legal|terms|privacy|policy|"
+    r"stores?|locations?|branch|dealers?|offices?|sitemap|rss|feed|events?|"
+    r"testimonial|review|partner|investor|newsroom|resources?)\b", re.IGNORECASE)
+# ALWAYS-sensitive categories — one of these = a genuine exposure anywhere (even a public
+# page must never contain a private key / session token / national-ID / card number).
+_STRONG_CATS = {"private_key", "jwt", "aws_key", "bearer_token",
+                "pan", "aadhaar", "ssn", "credit_card", "ifsc"}
+# WEAK: phone/email appear legitimately on every contact/careers page.
+# AMBIGUOUS: an api-key / token field could be a leaked secret OR a normal client-side key
+# (e.g. a Google Maps `AIza…` key). It is NOT auto-critical — confirm with syber_test_api_key.
+# So credential_field only counts on a NON-public path (a password in an API response),
+# never bumps a public marketing page to CRITICAL.
+
+
+def scan_sensitive(body: str | None, content_type: str = "", url: str = "") -> DataEvidence:
+    """Classify a response body. PURE — no network, no disk. The single source of truth
+    for "is there real SENSITIVE data here?". `url` gives context: intentionally-public
+    endpoints (careers/blog/contact/stores…) are never a PII leak even if they list a
+    phone/email — that is the #1 false positive. REAL_DATA requires a STRONG PII/secret
+    signal, or many records each carrying weak PII (a real user dump), not a lone match."""
     ct = (content_type or "").lower()
     raw = body or ""
     ev = DataEvidence(length=len(raw), content_type=ct)
     sample = raw[:_SCAN_CAP]
     norm = sample.strip().lower()
+    is_public_path = bool(_PUBLIC_CONTENT_RX.search(url or ""))
 
     if not raw or norm in _EMPTY_BODIES or len(sample.strip()) < 3:
         ev.verdict = "EMPTY"
@@ -228,12 +249,30 @@ def scan_sensitive(body: str | None, content_type: str = "") -> DataEvidence:
     ev.redacted_samples = samples
     ev.record_count = _count_records(sample, ct)
 
-    if cats:
+    strong = [c for c in cats if c in _STRONG_CATS]
+    weak = [c for c in cats if c in ("phone", "email")]
+    has_cred_field = "credential_field" in cats
+    # REAL_DATA (CRITICAL) requires genuine sensitivity:
+    #   * a STRONG secret/PII category (private key, JWT, token, PAN, SSN, card…) — anywhere;
+    #   * on a NON-public path only: a credential/password field, OR weak PII as a clear
+    #     USER DUMP (many records each bearing a phone/email).
+    # A lone phone/email, a public careers/contact page, or a bare api-key (→ test with
+    # syber_test_api_key) never earns REAL_DATA on their own.
+    is_real = False
+    if strong:
+        is_real = True
+    elif not is_public_path and has_cred_field:
+        is_real = True
+    elif not is_public_path and weak and ev.record_count >= 5 and sum(
+            cats.get(c, 0) for c in weak) >= ev.record_count:
+        is_real = True
+
+    if is_real:
         ev.verdict = "REAL_DATA"
     elif "html" in ct or sample.lstrip()[:1] == "<" or "<!doctype" in norm[:64] or "<html" in norm[:256]:
         ev.verdict = "BOILERPLATE"
     elif ev.record_count >= 1 and (sample.strip()[:1] in ("{", "[") or "csv" in ct):
-        ev.verdict = "STRUCTURED"
+        ev.verdict = "STRUCTURED"     # structured but not sensitive (e.g. a public listing) = HIGH-at-most, not CRITICAL
     else:
         ev.verdict = "BOILERPLATE"
     return ev

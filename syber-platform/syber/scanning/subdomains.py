@@ -377,6 +377,35 @@ def _resolve(host: str) -> list[str]:
         return []
 
 
+def detect_wildcard_ips(apex: str, tries: int = 3) -> set[str]:
+    """Detect wildcard DNS: resolve random nonexistent labels; any IPs they return are
+    wildcard IPs. On a wildcard domain EVERY brute candidate 'resolves' to these — the
+    #1 cause of thousands of ghost subdomains. Returns the wildcard IP set (empty = none)."""
+    import uuid as _uuid
+    wc: set[str] = set()
+    for _ in range(tries):
+        rand = f"syber-nx-{_uuid.uuid4().hex[:12]}.{apex}"
+        wc |= set(_resolve(rand))
+    return wc
+
+
+def _drop_wildcard_ghosts(resolved: dict[str, list[str]], discovered: set[str],
+                          wildcard_ips: set[str], apex: str) -> tuple[dict[str, list[str]], int]:
+    """Keep a host only if it is from a real SOURCE (CT/subfinder) OR resolves to at least
+    one IP that is NOT a wildcard IP (a genuinely distinct host). A brute/guess candidate
+    that resolves solely to the wildcard IP is a ghost — drop it. Returns (kept, dropped)."""
+    if not wildcard_ips:
+        return resolved, 0
+    kept: dict[str, list[str]] = {}
+    dropped = 0
+    for host, ips in resolved.items():
+        if host in discovered or host == apex or (set(ips) - wildcard_ips):
+            kept[host] = ips
+        else:
+            dropped += 1
+    return kept, dropped
+
+
 def _http_status(host: str, timeout: int = 6) -> int | None:
     for scheme in ("https", "http"):
         try:
@@ -429,6 +458,13 @@ def enumerate_subdomains(domain: str, *, deep: bool = True, probe: bool = True,
     names = set(list(names)[:max_hosts])
 
     resolved = resolve_hosts(names, workers=workers)
+    # Kill wildcard-DNS ghosts: on a `*.apex` wildcard, every brute guess "resolves" to
+    # the same IP → thousands of fake hosts that then poison coverage forever. Keep only
+    # real-sourced names + hosts with a distinct (non-wildcard) IP.
+    wildcard_ips = detect_wildcard_ips(apex)
+    resolved, ghosts = _drop_wildcard_ghosts(resolved, discovered, wildcard_ips, apex)
+    if ghosts:
+        meta["wildcard_ghosts_dropped"] = ghosts
     results: dict[str, Subdomain] = {}
     for host, ips in resolved.items():
         sd = Subdomain(host=host, ips=ips, env=classify_env(host))

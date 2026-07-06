@@ -1328,6 +1328,28 @@ HONEST NOTE to user: part of the "no critical" may also be that the target harde
 surface was never actually tested, so the prior "no critical" was NOT trustworthy. These fixes restore the
 ability to test it.
 
+### 33. Kill false positives + unprovable reports + ghost-subdomain loop (2026-07-06)
+Run flagged CRITICAL "PII exposure" on `hinge.co/api/careers/all` (a PUBLIC careers listing — the "phone"
+was a contact number), the email shipped that CRITICAL but verify.sh said "No CONFIRMED findings" (unprovable
+contradiction), and the loop burned all 12 passes on 1573 non-resolving "ghost" subdomains. Three fixes:
+- **A. Context-aware data classifier (`exfil.scan_sensitive` now takes `url`):** intentionally-public paths
+  (careers/jobs/blog/press/about/contact/stores/docs…) never earn REAL_DATA from weak PII. REAL_DATA now
+  requires a STRONG always-sensitive category (private key / JWT / token / PAN / Aadhaar / SSN / card / IFSC)
+  anywhere, OR — on a NON-public path only — a credential/password field or a real USER DUMP (≥5 records each
+  bearing phone/email). A lone phone/email, a public listing, or a bare api-key (Maps `AIza…`) never auto-
+  CRITICAL — api-keys go through `syber_test_api_key`. Threaded `url=` into all 4 callers. Fixes the careers FP
+  AND the original Maps-key FP.
+- **B. Report reconciliation (`reporting._reconcile_findings`):** a HIGH/CRITICAL finding with NO confirmed
+  reproduction (no repro URL from verify.sh appears in the finding) is demoted to **UNVERIFIED** (needs-triage
+  section), never shown as proven. Subject/headline now "(N confirmed, M unverified)". Ends the "CRITICAL email
+  + empty verify.sh" contradiction — the report can no longer claim something it can't reproduce.
+- **C. Wildcard-DNS ghost filter (`subdomains.detect_wildcard_ips` + `_drop_wildcard_ghosts`):** on a `*.apex`
+  wildcard every brute guess "resolves" → thousands of fake hosts that poison coverage forever. Now resolve
+  random nonexistent labels to learn the wildcard IPs, and keep a host only if it is real-sourced (CT/subfinder)
+  or resolves to a DISTINCT (non-wildcard) IP. Kills the 1573-ghost / max-passes waste.
+- Tests: test_fp_fixes.py (11: careers/weak/strong/dump/api-key classification, wildcard-ghost drop, repro
+  reconciliation). **298 pass** (8 known auth-revert). REBUILD via ./scripts/syber_fleet.sh.
+
 *Bottom line: the platform is built, the Kali image is rebuilt, and every layer is verified
 in-container — there is no outstanding build/setup step. §7 (severity/persistence/startup) done;
 §11 added the web-app pentest layer (IDOR/BOLA + injection + PTT); §12 added ephemeral teardown
