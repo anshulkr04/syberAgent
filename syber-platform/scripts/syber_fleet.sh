@@ -40,8 +40,22 @@ done
 ATTEST="I own and am authorised to test this target"
 MAX_PASSES="${SYBER_MAX_PASSES:-12}"
 RALPH_STRICT="${SYBER_RALPH_STRICT:-1}"
-CONCURRENCY="${SYBER_FLEET_CONCURRENCY:-6}"
+CONCURRENCY="${SYBER_FLEET_CONCURRENCY:-6}"   # full throughput; lower it (or SYBER_LEAN=1) if RAM-constrained
 COMPOSE="docker compose -f infra/docker-compose.kali.yml"
+
+# SYBER_LEAN=1 — RAM-constrained profile. The DEFAULT already applies the FREE savings
+# (capped JVM heaps + GDS removed, ~no perf cost). LEAN trades some throughput/depth for a
+# smaller footprint (~2-2.5GB): tighter JVMs, fewer parallel workers, and passive-only
+# subdomain enum (skips the memory-heavy massdns/puredns brute).
+if [ "${SYBER_LEAN:-0}" = "1" ]; then
+  echo "[syber] SYBER_LEAN=1 — memory-constrained profile (lower throughput)."
+  export SYBER_NEO4J_HEAP="${SYBER_NEO4J_HEAP:-384m}" SYBER_NEO4J_PAGECACHE="${SYBER_NEO4J_PAGECACHE:-256m}"
+  export SYBER_NEO4J_MEM="${SYBER_NEO4J_MEM:-1g}" SYBER_KAFKA_MEM="${SYBER_KAFKA_MEM:-512m}"
+  export KAFKA_HEAP_OPTS="${KAFKA_HEAP_OPTS:--Xmx256m -Xms128m}" SYBER_PG_MEM="${SYBER_PG_MEM:-256m}"
+  export SYBER_KALI_MEM="${SYBER_KALI_MEM:-3g}"
+  CONCURRENCY="${SYBER_FLEET_CONCURRENCY:-3}"
+  export SYBER_SUBDOMAIN_BRUTE="${SYBER_SUBDOMAIN_BRUTE:-0}"
+fi
 
 [ -n "$TARGET" ] || { echo "usage: $0 <target> [attestation] [context.md]" >&2; exit 2; }
 

@@ -50,8 +50,18 @@ RUN git clone --depth 1 https://github.com/drwetter/testssl.sh.git /opt/testssl 
       https://raw.githubusercontent.com/vulnersCom/nmap-vulners/master/vulners.nse \
  && nmap --script-updatedb 2>/dev/null || true
 
-# Point agent-browser at the system chromium (no per-user Chrome download needed).
-ENV AGENT_BROWSER_EXECUTABLE_PATH=/usr/bin/chromium
+# Point agent-browser at a memory-lean chromium wrapper (Chrome is the #1 RAM hog in the
+# container). The wrapper prepends memory-reduction flags and forwards agent-browser's own
+# args ("$@"). Safe flags only — the SYS_ADMIN namespace sandbox is untouched (no --no-sandbox).
+RUN printf '%s\n' '#!/bin/sh' \
+      'exec /usr/bin/chromium \' \
+      '  --disable-dev-shm-usage --disable-gpu --disable-extensions "$@"' > /usr/local/bin/chromium-lean \
+ && chmod +x /usr/local/bin/chromium-lean
+ENV AGENT_BROWSER_EXECUTABLE_PATH=/usr/local/bin/chromium-lean
+# Only container-safe, perf-neutral flags: --disable-dev-shm-usage (avoids /dev/shm
+# exhaustion crashes) + --disable-gpu/--disable-extensions (headless, no cost). We do NOT
+# cap V8 heap or disable site-isolation — those crash/slow rendering of heavy JS SPAs,
+# which is exactly what we analyse. Sandbox untouched (no --no-sandbox).
 
 # --- Node 20 + Claude Code + agent-browser ----------------------------------
 RUN curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \

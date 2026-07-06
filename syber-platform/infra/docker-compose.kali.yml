@@ -14,9 +14,18 @@ services:
     image: neo4j:5.19-enterprise
     environment:
       NEO4J_AUTH: neo4j/changeme
-      NEO4J_PLUGINS: '["graph-data-science"]'
+      # graph-data-science plugin REMOVED — all analytics (dijkstra/yens/betweenness) run
+      # in-process via NetworkX (graph/store.py); GDS was loaded but never called and is
+      # memory-heavy. Dropping it lowers Neo4j RAM + speeds startup.
       NEO4J_ACCEPT_LICENSE_AGREEMENT: "yes"
+      # Cap the JVM: without these Neo4j auto-sizes heap+pagecache off host RAM (2-3GB+).
+      # An engagement graph is KB-MB, so these caps are generous and cost NO performance.
+      # Tunable if you ever load a huge graph; SYBER_LEAN drops them further.
+      NEO4J_server_memory_heap_initial__size: "${SYBER_NEO4J_HEAP:-1g}"
+      NEO4J_server_memory_heap_max__size: "${SYBER_NEO4J_HEAP:-1g}"
+      NEO4J_server_memory_pagecache_size: "${SYBER_NEO4J_PAGECACHE:-512m}"
     ports: ["7474:7474", "7687:7687"]
+    mem_limit: "${SYBER_NEO4J_MEM:-2g}"    # generous ceiling (not a squeeze) against JVM runaway
     networks: [syber]
     healthcheck:
       test: ["CMD-SHELL", "cypher-shell -u neo4j -p changeme 'RETURN 1' || exit 1"]
@@ -31,6 +40,7 @@ services:
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: changeme
     ports: ["5432:5432"]
+    mem_limit: "${SYBER_PG_MEM:-512m}"
     networks: [syber]
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U postgres"]
@@ -41,7 +51,11 @@ services:
   kafka:
     image: apache/kafka:3.8.0
     networks: [syber]
+    mem_limit: "${SYBER_KAFKA_MEM:-1g}"
     environment:
+      # Cap the Kafka JVM (default grabs ~1GB). The Syber bus carries tiny event volume,
+      # so a 512m heap is ample — no throughput cost at this scale.
+      KAFKA_HEAP_OPTS: "${KAFKA_HEAP_OPTS:--Xmx512m -Xms256m}"
       KAFKA_NODE_ID: 1
       KAFKA_PROCESS_ROLES: broker,controller
       KAFKA_LISTENERS: PLAINTEXT://:9092,CONTROLLER://:9093
@@ -66,7 +80,8 @@ services:
       - NET_RAW                          # nmap/masscan raw sockets
       - NET_ADMIN
       - SYS_ADMIN                        # Chrome (agent-browser) namespace sandbox
-    shm_size: "1gb"                      # Chrome shared memory
+    shm_size: "512m"                     # Chrome uses --disable-dev-shm-usage, so it needs little shm
+    mem_limit: "${SYBER_KALI_MEM:-6g}"   # generous ceiling (guards runaway; does NOT squeeze the scanners)
     depends_on:
       neo4j: {condition: service_healthy}
       postgres: {condition: service_healthy}

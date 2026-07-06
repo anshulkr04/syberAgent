@@ -497,13 +497,10 @@ def run_bypass_403(task: Task, board: Board, wid: str) -> WorkerResult:
     url = getattr(task, "url", "") or _url_for(target)
     lid = _lead_id(task)
     try:
-        from ..scanning import bypass403, webapp
-        from ..scanning import credentials as cred
+        from ..waf import bypass as wafbypass
+        from ..scanning import webapp
     except Exception as e:  # noqa: BLE001
         return WorkerResult(status="failed", note=f"import failed: {e}")
-    secret_text = " ".join(
-        f"x-vercel-protection-bypass={c.value}" for c in cred.get_store().all()
-        if c.name.lower() == "x-vercel-protection-bypass")
 
     def fetch(u, method="GET", headers=None):
         try:
@@ -511,18 +508,21 @@ def run_bypass_403(task: Task, board: Board, wid: str) -> WorkerResult:
         except Exception:  # noqa: BLE001
             return {"status": None, "body": "", "headers": {}}
 
-    r = bypass403.run_bypass403(url, fetch, harvested_text=secret_text, max_mutations=80)
-    if r.bypassed and r.winner:
-        _ingest_vuln(url, "403-bypass", name=f"403/401 access-control bypass ({url})",
-                     severity="high", source="bypass_403")
+    # Full engine: WAF fingerprint → Next.js middleware skip (CVE-2025-29927) + host-header +
+    # the nomore403 header/path/method battery + harvested Vercel secret.
+    r = wafbypass.run_bypass(url, fetch, max_variants=80)
+    if r.get("bypassed") and r.get("winner"):
+        w = r["winner"]
+        _ingest_vuln(url, "waf-bypass", name=f"WAF/403 bypass on {url} ({r.get('waf')})",
+                     severity="high", source="waf_bypass")
         _record(board, lid, "bypass_403", success=True,
-                evidence=f"bypassed {r.baseline_status}->{r.winner['status']} via {r.winner['label']}",
+                evidence=f"bypassed {r.get('waf')} via {w.get('technique') or w.get('label')} -> {w.get('status')}",
                 rung=EvidenceRung.VERIFIED)
-        return WorkerResult(status="done", result_ref=f"bypass_403:{url}",
-                            note=f"403 BYPASSED via {r.winner['label']}")
+        return WorkerResult(status="done", result_ref=f"waf_bypass:{url}",
+                            note=f"WAF BYPASSED ({r.get('waf')}) via {w.get('technique') or w.get('label')}")
     _record(board, lid, "bypass_403", success=False,
-            note=f"no 403 bypass ({r.tried} mutations tried)")
-    return WorkerResult(status="done", note=f"no bypass ({r.tried} tried)")
+            note=f"no bypass on {r.get('waf', '?')} ({r.get('tried', 0)} mutations)")
+    return WorkerResult(status="done", note=f"no bypass ({r.get('tried', 0)} tried)")
 
 
 def run_service_probe(task: Task, board: Board, wid: str) -> WorkerResult:

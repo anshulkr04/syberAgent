@@ -228,10 +228,12 @@ after any compaction.
   concluding; verify_lead injects the matching CVE descriptions + PoC pointers),
   **verify_data_exposure** (PULL a sample from an unauthenticated endpoint and confirm it returns REAL
   sensitive data — the rung-4/CRITICAL proof; a `200`/`true` is reachability, not impact),
-  **bypass_403** (systematic 401/403 bypass — IP-trust headers, path normalization, method fuzzing, and the
-  harvested Vercel `x-vercel-protection-bypass` secret; returns the exact mutation that flipped 403→2xx.
-  For app-level/IP-allowlist/Vercel blocks — a true Cloudflare/Akamai JS challenge still needs agent-browser
-  render / waf_fallback), **test_api_key** (DEEP-DIVE an exposed key — prove if it's unrestricted/billable; a
+  **bypass_403** (WAF-bypass engine: FINGERPRINTS the WAF (Cloudflare/CloudFront/Vercel/Akamai/…), then tries
+  Next.js middleware skip **CVE-2025-29927** `x-middleware-subrequest: middleware:middleware:...`, x-forwarded-host
+  SSRF, IP-trust headers, path normalization, method fuzzing, and the harvested Vercel `x-vercel-protection-bypass`
+  secret — returns the exact mutation that flipped 403→2xx. For a POST/body endpoint use the waf.bypass helpers
+  (body_padding / content_type_switch / multipart & json parsing-discrepancy = WAFFLED) via syber_http_request.
+  A true Cloudflare/Akamai JS challenge still needs agent-browser render / waf_fallback origin-pivot), **test_api_key** (DEEP-DIVE an exposed key — prove if it's unrestricted/billable; a
   restricted key is INFO, not a finding), **harvest_credentials** (pull JWTs / API keys / documented creds from a JS bundle or API doc
   into the replay store), **add_session** (register a logged-in Cookie for replay — also records that you logged in),
   **login_exhausted** (honestly close the login gate only after a real failed attempt), **auth_retest**

@@ -1375,6 +1375,60 @@ built). Implemented the missing systematic layer:
 Sources: Vercel docs/protection-bypass-automation, trendmicro/penligent Vercel-breach, github devploit/
 nomore403, github vavkamil/XFFenum, blog.vidocsecurity 401-403-bypass.
 
+### 35. WAF bypass module from spec (waf/bypass.py) (2026-07-06)
+User handed a detailed WAF-bypass build spec (nowafpls/WAFFLED/react2shell/CVE-2025-29927/BreakingWAF/
+Awesome-WAF). Validated the key detail on the web (CVE-2025-29927 exact header `x-middleware-subrequest:
+middleware:middleware:middleware:middleware:middleware` for Next 15.x + `middleware`/`pages/_middleware`/
+`src/middleware` for 12-14). Built `syber/waf/bypass.py` implementing the high-yield deterministic techniques
+(spec §2-§4, §6, §11 priority), REUSING existing origin-discovery (waf/fallback) + Cloudflare solver
+(waf/solver) + nomore403 (scanning/bypass403) rather than duplicating:
+- **fingerprint_waf** (pure) — multi-WAF from headers/cookies/server/body + body-inspection-limit table.
+- **body_padding** (nowafpls, content-type-aware), **content_type_switch**, **multipart_parsing_discrepancy**
+  (WAFFLED M1/M3/M4/M5/M6/M8), **json_parsing_discrepancy**, **encoding_obfuscation**.
+- **Next.js/Vercel**: nextjs_middleware_headers (CVE-2025-29927 all-version payloads), host_header_ssrf_headers.
+- **BypassEngine** — per-WAF TECHNIQUE_ORDER + is_blocked/bypassed detection; run_bypass = fingerprint →
+  middleware/host + fold-in nomore403. Payload templates (XSS incl svg_animate, SQLi, SSRF).
+- Wiring: fleet run_bypass_403 → waf.bypass.run_bypass (auto on every 401/403 lead); MCP syber_bypass_403 →
+  engine (guides to WAFFLED body helpers for POST + browser/origin-pivot for JS challenges). CLAUDE.md updated.
+- Tests: test_waf_bypass.py (11). **317 pass** (8 known auth-revert). Honest scope: defeats app-level/parser-
+  discrepancy/Next.js/IP-allowlist/Vercel-protection; a true Cloudflare/Akamai JS challenge still needs the
+  browser-render + origin-pivot (already built). h2_desync/chunked (§3.6.2/§3.8) NOT built (raw-socket, low ROI).
+- NOTE on the user's other symptom (2000 tasks, DNS non-resolution): that is the wildcard-ghost issue fixed in
+  §33 (`_drop_wildcard_ghosts`) — applies after rebuild (hinge.co `*.` resolves to Vercel 76.76.21.21).
+
+### 36. Memory optimization — ~7GB → ~3-4GB (2026-07-06)
+User: a run eats ~7GB RAM. Root cause: NO memory caps anywhere — Neo4j-enterprise + Kafka JVMs auto-size off
+host RAM (2-3GB + ~1GB), plus uncapped Chrome + scanners. Fixes (all in compose/Dockerfile/scripts):
+- **Neo4j**: pinned `NEO4J_server_memory_heap_max__size=512m` + `heap_initial=512m` + `pagecache=384m`,
+  `mem_limit=1200m`. AND removed the `graph-data-science` plugin — confirmed all analytics (dijkstra/yens/
+  betweenness) run in-process via NetworkX (graph/store.py); GDS was loaded-but-never-called dead weight.
+- **Kafka**: `KAFKA_HEAP_OPTS=-Xmx384m -Xms256m`, `mem_limit=768m`.
+- **Postgres**: `mem_limit=384m`.
+- **Kali**: `mem_limit=3g`, `shm_size` 1gb→512m, and a **chromium-lean wrapper** (Dockerfile) that prepends
+  `--disable-dev-shm-usage --disable-gpu --disable-extensions --renderer-process-limit=2
+  --disable-features=site-per-process --js-flags=--max-old-space-size=512` and forwards agent-browser's args
+  ("$@"); AGENT_BROWSER_EXECUTABLE_PATH points at it (sandbox untouched — no --no-sandbox).
+- **Fleet concurrency** default 6→4 (fewer simultaneous Chrome/scanner processes = lower peak RAM).
+Hard-cap total ~5.3GB ceiling; realistic steady-state ~3-4GB (heap caps keep JVMs well under their limits).
+compose validates; 317 pass (8 known auth-revert). REBUILD required (Dockerfile chromium wrapper + Neo4j/
+Kafka env take effect on `docker compose ... up`/rebuild via the script).
+
+### 36b. Rebalanced after "these affect performance" (2026-07-06)
+User pushed back — some caps cost perf. Separated FREE wins (kept) from perf-costing squeezes (reverted/
+gated), honestly:
+- KEPT (free — engagement data is tiny so smaller JVM heaps cost nothing): Neo4j heap→1g + pagecache 512m +
+  **GDS removed** (dead weight), Kafka heap 512m, Chrome `--disable-dev-shm-usage`/`--disable-gpu`. These give
+  the bulk of the saving (~1.5-2GB) at no throughput cost.
+- REVERTED (were hurting perf): concurrency back to 6; Chrome `--js-flags=--max-old-space-size=512` +
+  `--disable-features=site-per-process` REMOVED (they crash/slow heavy-JS-SPA rendering — exactly our targets);
+  mem_limits loosened to GENEROUS ceilings (Neo4j 2g, Kali 6g) so scanners never OOM.
+- All caps now env-tunable (`SYBER_NEO4J_HEAP/PAGECACHE/MEM`, `KAFKA_HEAP_OPTS`, `SYBER_KAFKA_MEM`,
+  `SYBER_PG_MEM`, `SYBER_KALI_MEM`) with performance-preserving defaults.
+- **`SYBER_LEAN=1`** opt-in (syber_fleet.sh) for RAM-constrained hosts: tighter JVMs, concurrency 3,
+  passive-only subdomain enum (skips memory-heavy massdns/puredns) → ~2-2.5GB, at lower throughput.
+Net: default = full performance + the free ~1.5-2GB saving; LEAN = smaller footprint when the user chooses.
+Both profiles compose-validated; 317 pass.
+
 *Bottom line: the platform is built, the Kali image is rebuilt, and every layer is verified
 in-container — there is no outstanding build/setup step. §7 (severity/persistence/startup) done;
 §11 added the web-app pentest layer (IDOR/BOLA + injection + PTT); §12 added ephemeral teardown

@@ -532,20 +532,21 @@ def syber_bypass_403(url: str) -> dict[str, Any]:
     403s; a true Cloudflare/Akamai JS challenge needs agent-browser render or syber_waf_fallback."""
     def _run(u: str) -> dict[str, Any]:
         from syber.scanning.active_scan import _require_authorized
-        from syber.scanning import bypass403, credentials as cred
+        from syber.waf import bypass as wafbypass
         from urllib.parse import urlparse
         _require_authorized(urlparse(u).netloc.split(":")[0])
-        # mine any harvested Vercel secret from the credential store
-        secret_text = " ".join(
-            f"x-vercel-protection-bypass={c.value}" for c in cred.get_store().all()
-            if c.name.lower() == "x-vercel-protection-bypass")
         def fetch(fu, method="GET", headers=None):
             return webapp.http_request(fu, method=method, headers=headers or None, timeout=20)
-        r = bypass403.run_bypass403(u, fetch, harvested_text=secret_text)
-        out = r.to_dict()
-        if r.bypassed and r.winner:
-            out["guidance"] = ("BYPASSED — now re-run your data/auth checks (syber_verify_data_exposure / "
-                               "syber_auth_retest) using the winning header/path/method to reach the real content.")
+        out = wafbypass.run_bypass(u, fetch)
+        if out.get("bypassed") and out.get("winner"):
+            out["guidance"] = ("BYPASSED — replay the winning header/path/method with syber_http_request, "
+                               "then re-run syber_verify_data_exposure / syber_auth_retest to reach the data.")
+        else:
+            out["guidance"] = (f"No GET bypass on {out.get('waf')}. For a POST/body endpoint, the waf.bypass "
+                               "helpers (body_padding / content_type_switch / multipart_parsing_discrepancy / "
+                               "json_parsing_discrepancy) mutate the request — craft them via syber_http_request. "
+                               "If it's a true Cloudflare/Akamai JS challenge, use agent-browser render / "
+                               "syber_waf_fallback (origin pivot).")
         return out
     return _scan(_run, url)
 
